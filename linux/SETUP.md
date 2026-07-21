@@ -11,7 +11,7 @@ your actual copyright holder before distributing.
 
 ```bash
 # From a git repo (tag, branch, or commit):
-pip install git+https://github.com/YourOrg/ers-sdk.git@v2.7.0
+pip install "git+https://github.com/PureStorage-OpenConnect/everpureresilience-sdk.git@v2.7.0#subdirectory=linux"
 
 # Or, once published to a private index (configured in pip.conf / --index-url):
 pip install ers-sdk
