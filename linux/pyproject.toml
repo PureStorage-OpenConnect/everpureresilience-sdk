@@ -1,0 +1,18 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ers-sdk"
+version = "2.7.0"
+dependencies = ["PyJWT", "cryptography", "requests", "pyVmomi"]
+
+[project.scripts]
+ers-cli = "ers_cli:main"
+ers-system-test = "ers_system_test:main"
+
+[tool.setuptools]
+py-modules = ["ers_cli", "ers_system_test"]
+
+[tool.setuptools.packages.find]
+include = ["ers", "ers.*", "system_tests", "system_tests.*"]
