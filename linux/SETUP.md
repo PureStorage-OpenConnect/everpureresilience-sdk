@@ -49,13 +49,13 @@ output        = txt
 app_id           = pure1:apikey:YOUR_APP_ID
 private_key_path = ~/.ers/ers-private.pem
 
-[site vsphere prod-dc]
+[site vsphere prod-site]
 host = vcenter-source.example.com
 user = administrator@vsphere.local
 pass = yourpassword
 insecure = true
 
-[site vsphere dr-dc]
+[site vsphere drdc-site]
 host = vcenter-target.example.com
 user = administrator@vsphere.local
 pass = yourpassword
@@ -63,10 +63,10 @@ pass = yourpassword
 
 ```bash
 # Generate private key
-openssl genrsa -out ers-private.pem 2048
+openssl genrsa -out ~/.ers/ers-private.pem 2048
 
 # Extract public key
-openssl rsa -in ers-private.pem -pubout -out ers-public.pem
+openssl rsa -in ~/.ers/ers-private.pem -pubout -out ers-public.pem
 ```
 
 > Register `ers-public.pem` in Pure1:
@@ -78,7 +78,7 @@ openssl rsa -in ers-private.pem -pubout -out ers-public.pem
 
 > Note the naming: register a site with the same name in Pure1 > Resilience >
 > Deployment > Sites > your-site-name
-> In the example above, prod-dc and dr-dc are names used when the sites are
+> In the example above, prod-site and drdc-site are names used when the sites are
 > created. The names can be updated in Pure1, but MUST match what is in the
 > credentials file for the automation to work.
 
@@ -96,11 +96,11 @@ report rather than hand-authored:
     {
       "name": "vm-1",
       "networks": {
-        "prod-dc": ["prod-vm-network", "prod-dmz"],
-        "dr-dc":   ["dr-vm-network", "dr-dmz"]
+        "prod-site": ["prod-vm-portgroup-01", "prod-dmz-vlan-01"],
+        "drdc-site": ["drdc-vm-portgroup-01", "drdc-dmz-vlan-02"]
       }
     },
-    {"name": "vm-2", "networks": {"prod-dc": ["prod-vm-network"]}},
+    {"name": "vm-2", "networks": {"prod-site": ["prod-vm-network"]}},
     {"name": "vm-3"}
   ]
 }
@@ -109,7 +109,7 @@ report rather than hand-authored:
 - `schema_version` is required and validated — `2` is the only supported value today.
 - `generated_from`/`generated_at` are optional provenance, not read by ERS, but useful in a DR runbook.
 - Each VM needs a `name` matching the vCenter inventory exactly; duplicate names are rejected at load time.
-- `networks`, if present, is a **dict keyed by registered site name** — the same names you pass to `register_site(...)` and that appear in `~/.ers/credentials` as `[site vsphere prod-dc]`. Each `VSphereSite.connect_networks()` call picks its own entry by its own name (`self.name`), so **one vm-list.json drives failover, failback, and any further site in the same chain** — no separate file or parameter needed per direction. Within a site's list, entries are ordered and mapped to NIC 1, NIC 2, ... by position.
+- `networks`, if present, is a **dict keyed by registered site name** — the same names you pass to `register_site(...)` and that appear in `~/.ers/credentials` as `[site vsphere prod-site]`. Each `VSphereSite.connect_networks()` call picks its own entry by its own name (`self.name`), so **one vm-list.json drives failover, failback, and any further site in the same chain** — no separate file or parameter needed per direction. Within a site's list, entries are ordered and mapped to NIC 1, NIC 2, ... by position.
   - If a VM has no `networks` field at all, `connect_networks()` just ensures its NICs are connected on their current backing — no warning, this is the normal case for VMs that don't need network reconfiguration.
   - If a VM *has* a `networks` dict but it's missing the entry for the site you're calling `connect_networks()` on, that's flagged as a warning (likely a config gap) rather than silently skipped.
 
@@ -119,22 +119,22 @@ report rather than hand-authored:
 import ers
 
 e = ers.instance()                  # reads ~/.ers/config + credentials, auths automatically
-e.register_site("prod-dc")          # opens its own SmartConnect using credentials file
-e.register_site("dr-dc", si)        # or wrap an si you already connected yourself
+e.register_site("prod-site")          # opens its own SmartConnect using credentials file
+e.register_site("drdc-site", si)        # or wrap an si you already connected yourself
 
 e.group.list()
 e.plan.failover("prod", "PLAN-1")
 
 # Direct site actions
-e.sites["prod-dc"].power_off(file="vm-list.json")
-e.sites["prod-dc"].power_on(file="vm-list.json")
-e.sites["dr-dc"].connect_networks(file="vm-list.json")
-e.sites["prod-dc"].export_tags(file="vm-list.json")
-e.sites["dr-dc"].apply_tags(file="vm-list.json", source="prod-dc", create_missing=True)
+e.sites["prod-site"].power_off(file="vm-list.json")
+e.sites["prod-site"].power_on(file="vm-list.json")
+e.sites["drdc-site"].connect_networks(file="vm-list.json")
+e.sites["prod-site"].export_tags(file="vm-list.json")
+e.sites["drdc-site"].apply_tags(file="vm-list.json", source="prod-site", create_missing=True)
 
 e.workflow.managed_failover(
     vms_file="vm-list.json", group_names=["G1"], plan_names=["P1"],
-    from_site="prod-dc", to_site="dr-dc",
+    from_site="prod-site", to_site="drdc-site",
     with_network=True, with_tags=True,
 )
 
@@ -142,7 +142,7 @@ e.workflow.managed_failover(
 # your sites using the same name the site is registered under in Pure1.
 e.workflow.managed_failback(
     vms_file="vm-list.json", group_names=["G1"], plan_names=["P1"],
-    from_site="dr-dc", to_site="prod-dc",
+    from_site="drdc-site", to_site="prod-site",
     with_network=True, with_tags=True, create_missing_tags=True,
 )
 ```
@@ -154,23 +154,23 @@ ers-cli --list groups
 ers-cli --group run --names G1,G2
 ers-cli --plan failover --type prod --names P1,P2
 ers-cli --plan failback --names P1 --site DC.DEV
-ers-cli --managed-failover --from prod-dc --to dr-dc \
+ers-cli --managed-failover --from prod-site --to drdc-site \
            --vms-file vm-list.json --group-names G1,G2 --plan-names P1,P2 \
            --with-tags --create-missing-tags --dry-run
 
 # --to is also the Pure1 site name used for the failback API call — register
 # sites using the same name the site is registered under in Pure1.
-ers-cli --managed-failback --from dr-dc --to prod-dc \
+ers-cli --managed-failback --from drdc-site --to prod-site \
            --vms-file vm-list.json --group-names G1,G2 --plan-names P1,P2 \
            --with-network --with-tags --create-missing-tags
 
 # Direct site actions — power, network, and tags, without a full managed workflow
-ers-cli --site prod-dc --power off --vms-file vm-list.json
-ers-cli --site prod-dc --power off --names vm-1,vm-2
-ers-cli --site prod-dc --power on  --vms-file vm-list.json
-ers-cli --site dr-dc   --connect-networks --vms-file vm-list.json
-ers-cli --site prod-dc --export-tags --vms-file vm-list.json
-ers-cli --site dr-dc   --apply-tags --source prod-dc \
+ers-cli --site prod-site --power off --vms-file vm-list.json
+ers-cli --site prod-site --power off --names vm-1,vm-2
+ers-cli --site prod-site --power on  --vms-file vm-list.json
+ers-cli --site drdc-site   --connect-networks --vms-file vm-list.json
+ers-cli --site prod-site --export-tags --vms-file vm-list.json
+ers-cli --site drdc-site   --apply-tags --source prod-site \
            --vms-file vm-list.json --create-missing-tags
 ```
 
@@ -197,9 +197,9 @@ Edit `system-test-config.json`:
 {
   "schema_version": 1,
   "profile": "default",
-  "source_site": "prod-dc",
-  "target_site": "dr-dc",
-  "failback_site": "prod-dc",
+  "source_site": "prod-site",
+  "target_site": "drdc-site",
+  "failback_site": "prod-site",
   "group_names": ["YOUR-GROUP-1"],
   "plan_names": ["YOUR-PLAN-1"],
   "vms_file": "vm-list.json",
