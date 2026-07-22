@@ -168,9 +168,9 @@ ers-cli --managed-failback --from drdc-site --to prod-site \
 ers-cli --site prod-site --power off --vms-file vm-list.json
 ers-cli --site prod-site --power off --names vm-1,vm-2
 ers-cli --site prod-site --power on  --vms-file vm-list.json
-ers-cli --site drdc-site   --connect-networks --vms-file vm-list.json
+ers-cli --site drdc-site --connect-networks --vms-file vm-list.json
 ers-cli --site prod-site --export-tags --vms-file vm-list.json
-ers-cli --site drdc-site   --apply-tags --source prod-site \
+ers-cli --site drdc-site --apply-tags --source prod-site \
            --vms-file vm-list.json --create-missing-tags
 ```
 
