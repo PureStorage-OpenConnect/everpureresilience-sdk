@@ -6,9 +6,7 @@ users. Same capabilities as the Linux/macOS Python SDK.
 ## License
 
 Apache License, Version 2.0 — see `LICENSE`. Source files carry the
-standard Apache header; `NOTICE` carries the project attribution. Replace
-`[Your Organization]` in `LICENSE`, `NOTICE`, and each file's header with
-your actual copyright holder before distributing.
+standard Apache header; `NOTICE` carries the project attribution.
 
 ## Prerequisites
 

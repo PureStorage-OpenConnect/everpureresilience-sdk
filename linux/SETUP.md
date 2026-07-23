@@ -3,9 +3,7 @@
 ## License
 
 Apache License, Version 2.0 — see `LICENSE`. Source files carry the standard
-Apache header; `NOTICE` carries the project attribution. Replace
-`[Your Organization]` in `LICENSE`, `NOTICE`, and each file's header with
-your actual copyright holder before distributing.
+Apache header; `NOTICE` carries the project attribution.
 
 ## Install
 
