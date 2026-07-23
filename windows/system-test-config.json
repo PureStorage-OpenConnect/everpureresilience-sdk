@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "profile": "default",
+  "source_site": "prod-site",
+  "target_site": "drdc-site",
+  "failback_site": "prod-site",
+  "group_names": ["group-1"],
+  "plan_names": ["plan-1"],
+  "vms_file": "vm-list.json",
+  "with_network": true,
+  "with_tags": true,
+  "create_missing_tags": true,
+  "interval": 10,
+  "max_polls": 30
+}

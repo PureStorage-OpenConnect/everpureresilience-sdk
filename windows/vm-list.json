@@ -1,0 +1,21 @@
+{
+  "schema_version": 2,
+  "generated_from": "rvtools_export_2026-07-15.xlsx",
+  "generated_at": "2026-07-15T14:30:00Z",
+  "vms": [
+    {
+      "name": "vm-1",
+      "networks": {
+        "prod-site": ["prod-vlan-01"],
+        "drdc-site": ["drdc-vlan-01"]
+      }
+    },
+    {
+      "name": "vm-2",
+      "networks": {
+        "prod-site": ["prod-vlan-01", "prod-vlan-02"],
+        "drdc-site": ["drdc-vlan-01", "drdc-vlan-02"]
+      }
+    }
+  ]
+}
