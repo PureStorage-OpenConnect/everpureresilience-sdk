@@ -4,17 +4,17 @@
   "generated_at": "2026-07-15T14:30:00Z",
   "vms": [
     {
-      "name": "vm-1",
+      "name": "my-vm-01",
       "networks": {
-        "prod-site": ["prod-vlan-01"],
-        "drdc-site": ["drdc-vlan-01"]
+        "site-01": ["vm-net-01"],
+        "site-02": ["vm-net-02"]
       }
     },
     {
-      "name": "vm-2",
+      "name": "my-vm-02",
       "networks": {
-        "prod-site": ["prod-vlan-01", "prod-vlan-02"],
-        "drdc-site": ["drdc-vlan-01", "drdc-vlan-02"]
+        "site-01": ["vm-net-03", "vm-net-04"],
+        "site-02": ["vm-net-05", "vm-net-06"]
       }
     }
   ]

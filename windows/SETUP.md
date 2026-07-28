@@ -1,12 +1,18 @@
 # ERS.PowerCLI — Setup
 
 PowerShell SDK for the Everpure Resilience Service (ERS), for Windows
-users. Same capabilities as the Linux/macOS Python SDK.
+users. Same capabilities as the Linux/macOS Python SDK, built the
+PowerShell-native way: verb-noun cmdlets instead of method chaining, and
+[VCF.PowerCLI](https://developer.broadcom.com/powercli) (the renamed
+continuation of VMware.PowerCLI) instead of hand-rolled pyVmomi/REST calls
+for everything vCenter-related.
 
 ## License
 
 Apache License, Version 2.0 — see `LICENSE`. Source files carry the
-standard Apache header; `NOTICE` carries the project attribution.
+standard Apache header; `NOTICE` carries the project attribution. Replace
+`Everpure` in `LICENSE`, `NOTICE`, and each file's header with
+your actual copyright holder before distributing.
 
 ## Prerequisites
 
@@ -55,13 +61,13 @@ output        = txt
 app_id           = pure1:apikey:YOUR_APP_ID
 private_key_path = ~/.ers/ers-private.pem
 
-[site vsphere prod-site]
+[site vsphere prod-dc]
 host = vcenter-source.example.com
 user = administrator@vsphere.local
 pass = yourpassword
 insecure = true
 
-[site vsphere drdc-site]
+[site vsphere dr-dc]
 host = vcenter-target.example.com
 user = administrator@vsphere.local
 pass = yourpassword
@@ -71,17 +77,21 @@ pass = yourpassword
 # Generate an RSA key pair for the Pure1 API key (OpenSSL, or use
 # New-Object System.Security.Cryptography.RSACng if you'd rather stay
 # pure-PowerShell — either produces a compatible PEM)
-openssl genrsa -out ~/.ers/ers-private.pem 2048
-openssl rsa -in ~/.ers/ers-private.pem -pubout -out ers-public.pem
+openssl genrsa -out ers-private.pem 2048
+openssl rsa -in ers-private.pem -pubout -out ers-public.pem
 ```
 
 Register `ers-public.pem` in Pure1 → Administration → API Registration —
 same steps as the Linux/macOS SDK.
 
 > Register a site with the same name Pure1 uses for it (Pure1 → Resilience
-> → Deployment → Sites). `prod-site`/`drdc-site` above are examples — whatever
+> → Deployment → Sites). `prod-dc`/`dr-dc` above are examples — whatever
 > you name them here MUST match what's registered in Pure1, since the site
-> name doubles as the Pure1 site name for commands.
+> name doubles as the Pure1 site name for `Invoke-ErsManagedFailback`.
+
+There's no `chmod 600` on Windows — `Import-Module` prints a warning
+instead if `~/.ers/credentials` is readable by identities other than your
+own account, using file ACLs.
 
 ## 3. The vm-list file
 
@@ -97,15 +107,21 @@ Identical JSON schema (version 2) to the Linux/macOS SDK — the exact same
     {
       "name": "vm-1",
       "networks": {
-        "prod-site": ["prod-vm-portgroup-01", "prod-dmz-vlan-01"],
-        "drdc-site": ["drdc-vm-portgroup-01", "drdc-dmz-vlan-02"]
+        "prod-dc": ["prod-vm-network", "prod-dmz"],
+        "dr-dc":   ["dr-vm-network", "dr-dmz"]
       }
     },
-    {"name": "vm-2", "networks": {"prod-site": ["prod-vm-network"]}},
+    {"name": "vm-2", "networks": {"prod-dc": ["prod-vm-network"]}},
     {"name": "vm-3"}
   ]
 }
 ```
+
+`networks`, if present, is keyed by registered site name — each
+`Connect-ErsVMNetwork` call picks its own entry by its own site's name.
+If a VM has fewer existing NICs than networks configured for it, a new
+`vmxnet3` adapter is created for each missing position (via
+`VCF.PowerCLI`'s `New-NetworkAdapter`).
 
 ## 4. Use it as a library
 
@@ -113,27 +129,27 @@ Identical JSON schema (version 2) to the Linux/macOS SDK — the exact same
 Import-Module ERS.PowerCLI
 
 $Ers = New-ErsInstance                       # reads ~/.ers/config + credentials, auths automatically
-Register-ErsSite -ErsInstance $Ers -Name prod-site   # connects via VCF.PowerCLI using credentials file
-Register-ErsSite -ErsInstance $Ers -Name drdc-site -VIServer $conn  # or wrap a connection you made yourself
+Register-ErsSite -ErsInstance $Ers -Name prod-dc   # connects via VCF.PowerCLI using credentials file
+Register-ErsSite -ErsInstance $Ers -Name dr-dc -VIServer $conn  # or wrap a connection you made yourself
 
 Get-ErsGroup -ErsInstance $Ers
 Invoke-ErsPlanFailover -ErsInstance $Ers -Kind Prod -Name P1
 
 # Direct site actions
-Stop-ErsVM  -ErsSite $Ers.Sites['prod-site'] -VmsFile vm-list.json
-Start-ErsVM -ErsSite $Ers.Sites['prod-site'] -VmsFile vm-list.json
-Connect-ErsVMNetwork -ErsSite $Ers.Sites['drdc-site'] -VmsFile vm-list.json
-Export-ErsTag -ErsSite $Ers.Sites['prod-site'] -VmsFile vm-list.json
-Import-ErsTag -ErsSite $Ers.Sites['drdc-site'] -VmsFile vm-list.json -Source prod-site -CreateMissing
+Stop-ErsVM  -ErsSite $Ers.Sites['prod-dc'] -VmsFile vm-list.json
+Start-ErsVM -ErsSite $Ers.Sites['prod-dc'] -VmsFile vm-list.json
+Connect-ErsVMNetwork -ErsSite $Ers.Sites['dr-dc'] -VmsFile vm-list.json
+Export-ErsTag -ErsSite $Ers.Sites['prod-dc'] -VmsFile vm-list.json
+Import-ErsTag -ErsSite $Ers.Sites['dr-dc'] -VmsFile vm-list.json -Source prod-dc -CreateMissing
 
 Invoke-ErsManagedFailover -ErsInstance $Ers -VmsFile vm-list.json `
-    -GroupName G1, G2 -PlanName P1, P2 -FromSite prod-site -ToSite drdc-site `
+    -GroupName G1, G2 -PlanName P1, P2 -FromSite prod-dc -ToSite dr-dc `
     -WithNetwork -WithTags -DryRun
 
 # -ToSite doubles as the Pure1 site name for Invoke-ErsPlanFailback —
 # register sites using the same name the site is registered under in Pure1.
 Invoke-ErsManagedFailback -ErsInstance $Ers -VmsFile vm-list.json `
-    -GroupName G1, G2 -PlanName P1, P2 -FromSite drdc-site -ToSite prod-site `
+    -GroupName G1, G2 -PlanName P1, P2 -FromSite dr-dc -ToSite prod-dc `
     -WithNetwork -WithTags -CreateMissingTags
 ```
 
@@ -151,21 +167,25 @@ model as the Python SDK's system test suite:
   no confirmation) regardless of level selection — pass `-NoDryRun` (and
   `-IncludeDangerous`) to actually execute.
 
-Edit `system-test-config.json`:
+```powershell
+cp system-test-config.example.json system-test-config.json
+```
+
+Edit `system-test-config.json` (identical schema to the Python SDK's):
 
 ```json
 {
   "schema_version": 1,
   "profile": "default",
-  "source_site": "prod-site",
-  "target_site": "drdc-site",
-  "failback_site": "prod-site",
+  "source_site": "prod-dc",
+  "target_site": "dr-dc",
+  "failback_site": "prod-dc",
   "group_names": ["YOUR-GROUP-1"],
   "plan_names": ["YOUR-PLAN-1"],
   "vms_file": "vm-list.json",
   "with_network": true,
   "with_tags": true,
-  "create_missing_tags": true,
+  "create_missing_tags": false,
   "interval": 10,
   "max_polls": 30
 }
@@ -193,3 +213,29 @@ Invoke-ErsSystemTest -Level 3 -NoDryRun -IncludeDangerous -Yes
 # Just one test
 Invoke-ErsSystemTest -Level 2 -Only 'powers off VMs'
 ```
+
+## What's genuinely simpler here than the Python SDK
+
+`VCF.PowerCLI` has native cmdlets for things the Python SDK had to
+hand-roll:
+- **Tagging** (`Export-ErsTag`/`Import-ErsTag`) uses `Get-TagAssignment`,
+  `New-TagCategory`, `New-Tag`, `New-TagAssignment` directly — no manual
+  vSphere Automation REST calls.
+- **Network resolution** (`Connect-ErsVMNetwork`) uses `-NetworkName`,
+  which VCF.PowerCLI resolves against both standard and distributed
+  portgroups transparently — no manual DVS-vs-standard branching.
+
+## Notes / things to verify against a real environment
+
+I don't have a Windows/PowerShell environment with `VCF.PowerCLI`
+available to test this against directly — the module has been written
+carefully against documented cmdlet signatures and mirrors the
+already-tested Python SDK's logic, but hasn't been run end-to-end. Before
+relying on this for a real failover, run it in a lab:
+```powershell
+Import-Module .\ERS.PowerCLI\ERS.PowerCLI.psd1 -Verbose
+Get-Command -Module ERS.PowerCLI
+```
+to confirm the module imports cleanly and every cmdlet is discoverable,
+then walk through `Invoke-ErsSystemTest -Level 1` against a real Pure1
+deployment before trusting Level 2/3.

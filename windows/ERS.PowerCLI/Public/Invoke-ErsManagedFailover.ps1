@@ -1,4 +1,4 @@
-# Copyright 2026 [Your Organization]
+# Copyright 2026 Everpure
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -73,8 +73,19 @@ function Invoke-ErsManagedFailover {
     if (-not $DryRun) {
         Write-ErsStep "Protect groups: $($GroupName -join ', ')"
         Invoke-ErsGroupRun -ErsInstance $ErsInstance -Name $GroupName | Out-Null
+
+        Write-ErsStep "Waiting for protection run to complete: $($GroupName -join ', ')"
+        $groupResults = Wait-ErsGroup -ErsInstance $ErsInstance -Name $GroupName `
+            -IntervalSeconds $IntervalSeconds -MaxPolls $MaxPolls
+        $failedGroups = @($groupResults.GetEnumerator() | Where-Object { $_.Value -notin @('SUCCEEDED', 'COMPLETED') })
+        if ($failedGroups.Count -gt 0) {
+            $names = ($failedGroups | ForEach-Object { "$($_.Key) ($($_.Value))" }) -join ', '
+            Write-Host "Error: protection run did not succeed for all groups: $names"
+            return $false
+        }
     } else {
         Write-ErsDry "Invoke-ErsGroupRun -Name $($GroupName -join ',')"
+        Write-ErsDry "Wait-ErsGroup -Name $($GroupName -join ',')"
     }
 
     if (-not $DryRun) {

@@ -1,4 +1,4 @@
-# Copyright 2026 [Your Organization]
+# Copyright 2026 Everpure
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -162,12 +162,8 @@ function Invoke-ErsSystemTest {
     $pesterConfig.Output.Verbosity = 'Detailed'
 
     $result = Invoke-Pester -Configuration $pesterConfig
-
-    # Set $LASTEXITCODE (checkable by CI/scripts) WITHOUT calling exit — exit
-    # terminates the whole PowerShell process/window, not just this function,
-    # which is destructive when this cmdlet is run interactively.
     $global:LASTEXITCODE = if ($result.FailedCount -eq 0) { 0 } else { 1 }
-
     Write-Host "`n$(if ($result.FailedCount -eq 0) { 'All tests passed.' } else { "$($result.FailedCount) test(s) failed." })"
     return $result
+
 }

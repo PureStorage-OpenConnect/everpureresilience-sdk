@@ -12,14 +12,14 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-function Enable-ErsGroup {
+function Disable-ErsGroup {
     <#
     .SYNOPSIS
-        Enables protection for one or more application groups.
+        Disables protection for one or more application groups.
     .EXAMPLE
-        Enable-ErsGroup -ErsInstance $Ers -Name G1, G2
+        Disable-ErsGroup -ErsInstance $Ers -Name G1, G2
     #>
     [CmdletBinding()]
     param([Parameter(Mandatory)][ErsInstance]$ErsInstance, [Parameter(Mandatory)][string[]]$Name)
-    Set-ErsGroupProtectionState -ErsInstance $ErsInstance -Name $Name -Enable $true
+    Set-ErsGroupProtectionState -ErsInstance $ErsInstance -Name $Name -Enable $false
 }

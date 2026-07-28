@@ -1,4 +1,4 @@
-# Copyright 2026 [Your Organization]
+# Copyright 2026 Everpure
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -147,8 +147,8 @@ function Get-ErsSiteCredentials {
         $parts = $rest.Split(' ', 2)
         if ($parts.Count -ne 2) { continue }
         $type = $parts[0].Trim()
-        $name = $parts[1].Trim()
-        if ($name -eq $Name) {
+        $sectionName = $parts[1].Trim()
+        if ($sectionName -eq $Name) {
             return @{ Type = $type; Credentials = $Credentials[$section] }
         }
     }

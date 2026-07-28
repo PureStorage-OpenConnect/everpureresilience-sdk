@@ -12,14 +12,15 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-function Enable-ErsGroup {
+function Stop-ErsVM {
     <#
     .SYNOPSIS
-        Enables protection for one or more application groups.
+        Powers off VMs on the given site. Idempotent — already-off VMs
+        are left alone and still counted as success.
     .EXAMPLE
-        Enable-ErsGroup -ErsInstance $Ers -Name G1, G2
+        Stop-ErsVM -ErsSite $Ers.Sites['prod-dc'] -VmsFile vm-list.json
     #>
     [CmdletBinding()]
-    param([Parameter(Mandatory)][ErsInstance]$ErsInstance, [Parameter(Mandatory)][string[]]$Name)
-    Set-ErsGroupProtectionState -ErsInstance $ErsInstance -Name $Name -Enable $true
+    param([Parameter(Mandatory)][ErsSite]$ErsSite, [string[]]$Name, [string]$VmsFile)
+    Set-ErsVMPowerState -ErsSite $ErsSite -Name $Name -VmsFile $VmsFile -TurnOn $false
 }
