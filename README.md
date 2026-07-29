@@ -30,11 +30,10 @@ Full setup instructions — configuring `~/.ers/config` and
 `~/.ers/credentials`, registering vCenter sites, the vm-list file format,
 library and CLI usage, and running the system test suite — are here:
 
-**[Linux SETUP.md](https://github.com/PureStorage-OpenConnect/everpureresilience-sdk/blob/main/linux/SETUP.md)**
- OR  
+**[Linux SETUP.md](https://github.com/PureStorage-OpenConnect/everpureresilience-sdk/blob/main/linux/SETUP.md)** / 
 **[Windows SETUP.md](https://github.com/PureStorage-OpenConnect/everpureresilience-sdk/blob/main/windows/SETUP.md)**
 
-## Pre-requirements
+## Requirements
 
 - A Pure1 account with an ERS deployment and an API application ID
 - Access to the vCenter server(s) you want to protect/recover
