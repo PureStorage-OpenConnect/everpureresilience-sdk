@@ -4,15 +4,12 @@ PowerShell SDK for the Everpure Resilience Service (ERS), for Windows
 users. Same capabilities as the Linux/macOS Python SDK, built the
 PowerShell-native way: verb-noun cmdlets instead of method chaining, and
 [VCF.PowerCLI](https://developer.broadcom.com/powercli) (the renamed
-continuation of VMware.PowerCLI) instead of hand-rolled pyVmomi/REST calls
-for everything vCenter-related.
+continuation of VMware.PowerCLI).
 
 ## License
 
 Apache License, Version 2.0 — see `LICENSE`. Source files carry the
-standard Apache header; `NOTICE` carries the project attribution. Replace
-`Everpure` in `LICENSE`, `NOTICE`, and each file's header with
-your actual copyright holder before distributing.
+standard Apache header; `NOTICE` carries the project attribution.
 
 ## Prerequisites
 
@@ -41,9 +38,7 @@ Import-Module ERS.PowerCLI
 
 ## 1. `~/.ers/config` — non-secret settings, profiles like `~/.aws/config`
 
-Same file, same format, same path as the Linux/macOS SDK — `~` resolves
-to `$HOME` on Windows too, so this can even be the literal same file if
-you run both SDKs against the same account.
+`~` resolves to `$HOME` on Windows.
 
 ```ini
 [default]
@@ -52,7 +47,8 @@ deployment_id = your-deployment-id
 output        = txt
 ```
 
-> Get your deployment ID from Pure1 → Resilience → your deployment.
+> Note: Get your deployment-id from Pure1 > Resilience > Your Deployment (ID).
+> It will look something like eg. c951a9875de48435ea37876a5acf9af83
 
 ## 2. `~/.ers/credentials` — secrets
 
@@ -71,6 +67,7 @@ insecure = true
 host = vcenter-target.example.com
 user = administrator@vsphere.local
 pass = yourpassword
+insecure = true
 ```
 
 ```powershell
@@ -81,22 +78,25 @@ openssl genrsa -out ers-private.pem 2048
 openssl rsa -in ers-private.pem -pubout -out ers-public.pem
 ```
 
-Register `ers-public.pem` in Pure1 → Administration → API Registration —
-same steps as the Linux/macOS SDK.
+> Register `ers-public.pem` in Pure1:
+> 1. Log in to `https://pure1.purestorage.com`
+> 2. Go to **Administration → API Registration**
+> 3. Create or update your API key and paste the contents of `ers-public.pem`
+> 4. Use the Resource Operator Role for Permissions
+> 5. Note your **Application ID** (format: `pure1:apikey:xxxxxxxxxx`)
 
 > Register a site with the same name Pure1 uses for it (Pure1 → Resilience
 > → Deployment → Sites). `prod-dc`/`dr-dc` above are examples — whatever
 > you name them here MUST match what's registered in Pure1, since the site
-> name doubles as the Pure1 site name for `Invoke-ErsManagedFailback`.
+> name doubles as the Pure1 > Resilience > Deployment > Site name.
 
-There's no `chmod 600` on Windows — `Import-Module` prints a warning
-instead if `~/.ers/credentials` is readable by identities other than your
-own account, using file ACLs.
+`Import-Module` prints a warning instead if `~/.ers/credentials` is readable by
+identities other than your own account, using file ACLs.
 
 ## 3. The vm-list file
 
-Identical JSON schema (version 2) to the Linux/macOS SDK — the exact same
-`vm-list.json` works unmodified on either platform:
+JSON format - expected to be machine-generated from a CSV export or an RVTools
+report rather than hand-authored:
 
 ```json
 {
@@ -155,8 +155,8 @@ Invoke-ErsManagedFailback -ErsInstance $Ers -VmsFile vm-list.json `
 
 ## 5. System tests
 
-`Invoke-ErsSystemTest` wraps Pester with the same three-level, safety-gated
-model as the Python SDK's system test suite:
+`Invoke-ErsSystemTest` wraps Pester with three-level, safety-gated
+model:
 
 - **Level 1** — read-only. Safe any time, no confirmation.
 - **Level 2** — real operations: group runs, test/cleanup/prod
@@ -167,11 +167,7 @@ model as the Python SDK's system test suite:
   no confirmation) regardless of level selection — pass `-NoDryRun` (and
   `-IncludeDangerous`) to actually execute.
 
-```powershell
-cp system-test-config.example.json system-test-config.json
-```
-
-Edit `system-test-config.json` (identical schema to the Python SDK's):
+Edit `system-test-config.json`:
 
 ```json
 {
@@ -213,29 +209,3 @@ Invoke-ErsSystemTest -Level 3 -NoDryRun -IncludeDangerous -Yes
 # Just one test
 Invoke-ErsSystemTest -Level 2 -Only 'powers off VMs'
 ```
-
-## What's genuinely simpler here than the Python SDK
-
-`VCF.PowerCLI` has native cmdlets for things the Python SDK had to
-hand-roll:
-- **Tagging** (`Export-ErsTag`/`Import-ErsTag`) uses `Get-TagAssignment`,
-  `New-TagCategory`, `New-Tag`, `New-TagAssignment` directly — no manual
-  vSphere Automation REST calls.
-- **Network resolution** (`Connect-ErsVMNetwork`) uses `-NetworkName`,
-  which VCF.PowerCLI resolves against both standard and distributed
-  portgroups transparently — no manual DVS-vs-standard branching.
-
-## Notes / things to verify against a real environment
-
-I don't have a Windows/PowerShell environment with `VCF.PowerCLI`
-available to test this against directly — the module has been written
-carefully against documented cmdlet signatures and mirrors the
-already-tested Python SDK's logic, but hasn't been run end-to-end. Before
-relying on this for a real failover, run it in a lab:
-```powershell
-Import-Module .\ERS.PowerCLI\ERS.PowerCLI.psd1 -Verbose
-Get-Command -Module ERS.PowerCLI
-```
-to confirm the module imports cleanly and every cmdlet is discoverable,
-then walk through `Invoke-ErsSystemTest -Level 1` against a real Pure1
-deployment before trusting Level 2/3.
