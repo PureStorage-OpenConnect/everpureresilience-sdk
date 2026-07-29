@@ -87,8 +87,7 @@ openssl rsa -in ers-private.pem -pubout -out ers-public.pem
 
 > Register a site with the same name Pure1 uses for it (Pure1 → Resilience
 > → Deployment → Sites). `prod-dc`/`dr-dc` above are examples — whatever
-> you name them here MUST match what's registered in Pure1, since the site
-> name doubles as the Pure1 > Resilience > Deployment > Site name.
+> you name them here MUST match what's registered in Pure1.
 
 `Import-Module` prints a warning instead if `~/.ers/credentials` is readable by
 identities other than your own account, using file ACLs.
