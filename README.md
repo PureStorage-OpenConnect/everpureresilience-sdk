@@ -24,13 +24,14 @@ vCenter site(s).
   real operations, full workflows) to validate your setup against your
   actual environment
 
-## Install and Getting started
+## Installation and Getting started
 
 Full setup instructions — configuring `~/.ers/config` and
 `~/.ers/credentials`, registering vCenter sites, the vm-list file format,
 library and CLI usage, and running the system test suite — are here:
 
 **[Linux SETUP.md](https://github.com/PureStorage-OpenConnect/everpureresilience-sdk/blob/main/linux/SETUP.md)**
+ OR  
 **[Windows SETUP.md](https://github.com/PureStorage-OpenConnect/everpureresilience-sdk/blob/main/windows/SETUP.md)**
 
 ## Pre-requirements
