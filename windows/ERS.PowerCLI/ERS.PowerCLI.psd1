@@ -14,7 +14,7 @@
 
 @{
     RootModule        = 'ERS.PowerCLI.psm1'
-    ModuleVersion      = '1.0.0'
+    ModuleVersion      = '2.7.0'
     GUID               = 'b7e5c9a2-4f1d-4e3a-9c6b-2a8d7f1e5c3b'
     Author             = 'Everpure'
     CompanyName        = 'Everpure'

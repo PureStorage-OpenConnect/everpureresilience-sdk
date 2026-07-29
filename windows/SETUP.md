@@ -32,8 +32,14 @@ standard Apache header; `NOTICE` carries the project attribution.
 Import-Module .\ERS.PowerCLI\ERS.PowerCLI.psd1
 
 # Or, once published to the PowerShell Gallery / a private repository:
-Install-Module -Name ERS.PowerCLI -Scope CurrentUser
+Install-Module -Name ERS.PowerCLI -RequiredVersion 2.7.0 -Scope CurrentUser
 Import-Module ERS.PowerCLI
+```
+
+To check what version you have installed:
+
+```powershell
+(Get-Module ERS.PowerCLI).Version
 ```
 
 ## 1. `~/.ers/config` — non-secret settings, profiles like `~/.aws/config`
