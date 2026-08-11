@@ -21,8 +21,18 @@ caller — the CLI, a script, or the system test runner — can decide how to
 handle them (print-and-exit for the CLI; report-and-continue for the test
 runner, which needs one failing API call to fail just that test, not kill
 the whole suite).
+
+Set ERS_DEBUG=1 to print every outgoing request (method, URL, params,
+body) and the raw response to stderr — useful when the API rejects a
+request with a generic error like "Failed to read HTTP message" and you
+need to see exactly what was sent, e.g.:
+
+    ERS_DEBUG=1 ./ers_cli.py --policy create --name x --rpo 15 \\
+        --target-type vmw --local-retention 24 --remote-retention 72
 """
 
+import json
+import os
 import sys
 import time
 import datetime
@@ -35,6 +45,28 @@ except ImportError:
     sys.exit(1)
 
 TERMINAL_STATES = {"SUCCEEDED", "FAILED", "CANCELLED", "COMPLETED"}
+
+
+def _debug_enabled() -> bool:
+    return os.environ.get("ERS_DEBUG", "").lower() in ("1", "true", "yes")
+
+
+def _debug_request(method: str, url: str, params: dict, body):
+    if not _debug_enabled():
+        return
+    print(f"\n[ERS_DEBUG] --> {method} {url}", file=sys.stderr)
+    if params:
+        print(f"[ERS_DEBUG] params: {params}", file=sys.stderr)
+    if body is not None:
+        print(f"[ERS_DEBUG] body:\n{json.dumps(body, indent=2)}", file=sys.stderr)
+
+
+def _debug_response(response):
+    if not _debug_enabled():
+        return
+    print(f"[ERS_DEBUG] <-- {response.status_code}", file=sys.stderr)
+    if response.text:
+        print(f"[ERS_DEBUG] response body: {response.text}", file=sys.stderr)
 
 
 class ApiError(Exception):
@@ -55,8 +87,10 @@ class ApiClient:
 
     def get(self, path: str, params: dict = None) -> dict:
         url = f"{self.base_url}{path}"
+        _debug_request("GET", url, params, None)
         try:
             response = requests.get(url, headers=self._headers(), params=params)
+            _debug_response(response)
             response.raise_for_status()
             return response.json()
         except requests.HTTPError:
@@ -65,22 +99,32 @@ class ApiClient:
             raise ApiError(f"Could not connect to {self.base_url}")
 
     def post(self, path: str, params: dict = None, body: dict = None) -> dict:
-        url = f"{self.base_url}{path}"
+        return self.post_absolute(f"{self.base_url}{path}", params=params, body=body)
+
+    def post_absolute(self, url: str, params: dict = None, body: dict = None) -> dict:
+        """Like post(), but takes a full URL instead of a path relative to
+        self.base_url — for endpoints that live on a different host
+        entirely (e.g. the draas-api create endpoint vs. the pure-protect
+        automation API everything else in this SDK uses)."""
+        _debug_request("POST", url, params, body or {})
         try:
             response = requests.post(url, headers=self._headers({"Content-Type": "application/json"}),
                                       params=params, json=body or {})
+            _debug_response(response)
             response.raise_for_status()
             return response.json() if response.content else {}
         except requests.HTTPError:
             raise ApiError(f"HTTP error {response.status_code}: {response.text}")
         except requests.ConnectionError:
-            raise ApiError(f"Could not connect to {self.base_url}")
+            raise ApiError(f"Could not connect to {url}")
 
     def patch(self, path: str, params: dict = None, body: dict = None) -> dict:
         url = f"{self.base_url}{path}"
+        _debug_request("PATCH", url, params, body)
         try:
             response = requests.patch(url, headers=self._headers({"Content-Type": "application/json"}),
                                        params=params, json=body)
+            _debug_response(response)
             response.raise_for_status()
             return response.json() if response.content else {}
         except requests.HTTPError:

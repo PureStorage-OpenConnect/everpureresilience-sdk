@@ -41,6 +41,10 @@ examples:
   # Cleanup after test failover
   ers-cli --plan cleanup --names plan_name1
 
+  # Create a service level policy (rpo in minutes, retention/rto in hours)
+  ers-cli --policy create --name "policy name" --rpo 15 --target-type vmw \
+             --local-retention 24 --remote-retention 72
+
   # Failback — only runs if prod_failover SUCCEEDED, requires --site
   ers-cli --plan failback --names plan_name1 --site DC.DEV
 
@@ -92,6 +96,21 @@ def main():
     parser.add_argument("--list", metavar="RESOURCE",
                          help="List a resource: policies, groups, plans, sites, snapshots")
     parser.add_argument("--group", metavar="enable|disable|run", help="Group action")
+    parser.add_argument("--policy", metavar="ACTION", help="Policy action: create")
+    parser.add_argument("--name", metavar="NAME", help="Policy name, used with --policy create")
+    parser.add_argument("--rpo", type=int, metavar="MINUTES",
+                         help="RPO in minutes (0 allowed), used with --policy create")
+    parser.add_argument("--target-type", metavar="vmw|aws",
+                         help="Replication target platform, used with --policy create")
+    parser.add_argument("--local-retention", type=int, metavar="HOURS",
+                         help="Local snapshot retention in hours, used with --policy create")
+    parser.add_argument("--remote-retention", type=int, metavar="HOURS",
+                         help="Remote snapshot retention in hours, used with --policy create")
+    parser.add_argument("--estimated-rto", type=int, metavar="HOURS", default=0,
+                         help="Estimated recovery time objective in hours (default: 0), "
+                              "used with --policy create")
+    parser.add_argument("--description", metavar="TEXT", default="",
+                         help="Optional description, used with --policy create")
     parser.add_argument("--plan", metavar="ACTION", help="Plan action: failover, cleanup, failback")
     parser.add_argument("--type", metavar="test|prod", help="Failover type, used with --plan failover")
     parser.add_argument("--snapshot-ids", metavar="ID1,ID2", help="Explicit snapshot set IDs")
@@ -136,7 +155,7 @@ def main():
     site_action = any([args.power, args.connect_networks, args.export_tags, args.apply_tags,
                        args.list_networks])
 
-    if not any([args.list, args.group, args.plan, args.monitor,
+    if not any([args.list, args.group, args.policy, args.plan, args.monitor,
                 args.managed_failover, args.managed_failback, site_action]):
         parser.print_help()
         sys.exit(0)
@@ -174,6 +193,25 @@ def main():
             e.group.run(*names)
         else:
             print(f"Error: --group must be enable|disable|run, got '{args.group}'")
+            sys.exit(1)
+
+    if args.policy:
+        action = args.policy.lower()
+        if action == "create":
+            missing = [flag for flag, val in [
+                ("--name", args.name), ("--rpo", args.rpo), ("--target-type", args.target_type),
+                ("--local-retention", args.local_retention), ("--remote-retention", args.remote_retention),
+            ] if val is None]
+            if missing:
+                print(f"Error: --policy create requires {', '.join(missing)}")
+                sys.exit(1)
+            e.policy.create(name=args.name, rpo_minutes=args.rpo, target_type=args.target_type,
+                             local_retention_hours=args.local_retention,
+                             remote_retention_hours=args.remote_retention,
+                             estimated_rto_hours=args.estimated_rto,
+                             description=args.description)
+        else:
+            print(f"Error: --policy must be create, got '{args.policy}'")
             sys.exit(1)
 
     if args.plan:

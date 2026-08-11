@@ -14,6 +14,7 @@
 
 from .group import GroupResource
 from .plan import PlanResource
-from .site import SiteResource, PolicyResource
+from .site import SiteResource
+from .policy import PolicyResource
 
 __all__ = ["GroupResource", "PlanResource", "SiteResource", "PolicyResource"]
