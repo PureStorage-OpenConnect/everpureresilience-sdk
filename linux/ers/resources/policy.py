@@ -1,4 +1,4 @@
-# Copyright 2026 [Your Organization]
+# Copyright 2026 Everpure™
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -96,7 +96,7 @@ class PolicyResource:
         resolves names/pattern -> IDs via list() first.
         """
         ers = self._ers
-        data = ers.api.get(POLICIES_PATH, params={"offset": 0, "limit": 1000,
+        data = ers.api.get(POLICIES_PATH, params={"offset": 0, "limit": 300,
                                                     "deployment_id": ers.deployment_id})
         all_items = data.get("items") or []
 

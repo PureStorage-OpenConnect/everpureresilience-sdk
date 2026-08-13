@@ -1,4 +1,4 @@
-# Copyright 2026 [Your Organization]
+# Copyright 2026 Everpure™
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -32,7 +32,7 @@ import sys
 from . import auth, config as ers_config
 from .http import ApiClient
 from .formatting import Output
-from .resources import GroupResource, PlanResource, SiteResource, PolicyResource
+from .resources import GroupResource, PlanResource, SiteResource, PolicyResource, VmResource
 from .workflow import Workflow
 from .sites import SITE_TYPES, INSTANCE_DETECTORS
 
@@ -86,6 +86,7 @@ class ErsInstance:
         self.plan   = PlanResource(self)
         self.site   = SiteResource(self)
         self.policy = PolicyResource(self)
+        self.vm     = VmResource(self)
         self.workflow = Workflow(self)
 
         # registered sites, keyed by name

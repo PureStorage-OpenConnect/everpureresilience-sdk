@@ -1,4 +1,4 @@
-# Copyright 2026 [Your Organization]
+# Copyright 2026 Everpure™
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -70,7 +70,7 @@ class GroupResource:
 
     def _resolve_wildcard(self, pattern):
         ers = self._ers
-        data = ers.api.get(GROUPS_PATH, params={"offset": 0, "limit": 1000,
+        data = ers.api.get(GROUPS_PATH, params={"offset": 0, "limit": 300,
                                                  "deployment_id": ers.deployment_id})
         items = data.get("items") or data.get("data") or []
         return [g for g in items if fnmatch.fnmatch(g.get("name", ""), pattern)]
@@ -88,14 +88,14 @@ class GroupResource:
         """
         ers = self._ers
 
-        policy_data = ers.api.get(POLICIES_PATH, params={"offset": 0, "limit": 1000,
+        policy_data = ers.api.get(POLICIES_PATH, params={"offset": 0, "limit": 300,
                                                           "deployment_id": ers.deployment_id})
         policies = policy_data.get("items") or []
         policy_match = next((p for p in policies if p.get("name", "").lower() == with_policy.lower()), None)
         if not policy_match:
             raise ValueError(f"Policy '{with_policy}' not found")
 
-        site_data = ers.api.get(SITES_PATH, params={"offset": 0, "limit": 1000,
+        site_data = ers.api.get(SITES_PATH, params={"offset": 0, "limit": 300,
                                                      "deployment_id": ers.deployment_id})
         sites = site_data.get("items") or []
 

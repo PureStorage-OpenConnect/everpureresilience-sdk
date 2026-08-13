@@ -1,4 +1,4 @@
-# Copyright 2026 [Your Organization]
+# Copyright 2026 Everpure™
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -16,10 +16,12 @@
 
 import json
 import datetime
+import fnmatch
 
 from .. import formatting
 from ..config import state_path
 from ..http import poll_until_terminal
+from .group import GROUPS_PATH
 
 PLANS_PATH     = "/pure-protect/api/1.latest/recovery-plans"
 SNAPSHOTS_PATH = "/pure-protect/api/1.latest/recovery-plans/snapshot-sets"
@@ -80,8 +82,9 @@ class PlanResource:
 
     def _resolve(self, names):
         ers = self._ers
-        data = ers.api.get(PLANS_PATH, params={"offset": 0, "limit": 100,
-                                                "deployment_id": ers.deployment_id})
+        data = ers.api.get(PLANS_PATH, params={"offset": 0, "limit": 300,
+                                                "deployment_id": ers.deployment_id,
+                                                "names": ",".join(names)})
         plans = data.get("items") or data.get("data") or []
         lname = [n.lower() for n in names]
         matched   = [p for p in plans if p.get("name", "").lower() in lname]
@@ -90,13 +93,133 @@ class PlanResource:
 
     def _resolve_site_id(self, site_name: str):
         ers = self._ers
-        data = ers.api.get(SITES_PATH, params={"offset": 0, "limit": 100,
+        data = ers.api.get(SITES_PATH, params={"offset": 0, "limit": 300,
                                                 "deployment_id": ers.deployment_id})
         sites = data.get("items") or data.get("data") or []
         for site in sites:
             if site.get("name", "").lower() == site_name.lower():
                 return site["id"]
         return None
+
+    def _resolve_group_ids(self, group_names) -> list:
+        """Resolves a list of exact group names to their IDs, via the
+        already-established names= filter on GET /application-groups."""
+        ers = self._ers
+        data = ers.api.get(GROUPS_PATH, params={"offset": 0, "limit": 300,
+                                                 "deployment_id": ers.deployment_id,
+                                                 "names": ",".join(group_names)})
+        groups = data.get("items") or []
+        lname = [n.lower() for n in group_names]
+        matched = [g for g in groups if g.get("name", "").lower() in lname]
+        found_lower = {g.get("name", "").lower() for g in matched}
+        not_found = [n for n in group_names if n.lower() not in found_lower]
+        if not_found:
+            raise ValueError(f"Groups not found: {', '.join(not_found)}")
+        return [g["id"] for g in matched]
+
+    # -- create -----------------------------------------------------------
+    def create(self, name: str, with_groups, target_site: str, description: str = ""):
+        """Creates a recovery plan. with_groups resolves group names to
+        IDs; target_site resolves a site name to an ID."""
+        ers = self._ers
+        group_names = list(with_groups)
+        group_ids = self._resolve_group_ids(group_names)
+        target_site_id = self._resolve_site_id(target_site)
+        if not target_site_id:
+            raise ValueError(f"Site '{target_site}' not found")
+
+        body = {"name": name, "description": description,
+                 "group_ids": group_ids, "target_site_id": target_site_id}
+        result = ers.api.post(PLANS_PATH, params={"deployment_id": ers.deployment_id}, body=body)
+        items = result.get("items", [result]) if result else [{}]
+        item = items[0] if items else {}
+
+        ers.output.out(f"Created plan '{name}' (id: {item.get('id', '-')})")
+        ers.output.out_json("created_plan", item)
+        return item
+
+    # -- add / remove groups ------------------------------------------------
+    def add(self, name: str, with_groups):
+        """Adds group(s) to an existing plan's group_ids (union with what's
+        already there). The PATCH endpoint takes the full desired
+        group_ids/target_site_id every time — there's no partial-add
+        operation on the wire, so this reads the plan's current state
+        first and PATCHes the computed union."""
+        return self._patch_groups(name, list(with_groups), removing=False)
+
+    def remove(self, name: str, with_groups):
+        """Removes group(s) from an existing plan's group_ids. Same
+        read-current-state-then-PATCH-the-full-list approach as add()."""
+        return self._patch_groups(name, list(with_groups), removing=True)
+
+    def _patch_groups(self, name: str, group_names: list, removing: bool):
+        ers = self._ers
+        matched, not_found = self._resolve([name])
+        if not_found or not matched:
+            raise ValueError(f"Plan '{name}' not found")
+        plan = matched[0]
+
+        existing_group_ids = [g["id"] for g in (plan.get("groups") or [])]
+        changed_ids = self._resolve_group_ids(group_names)
+
+        if removing:
+            changed_set = set(changed_ids)
+            new_group_ids = [gid for gid in existing_group_ids if gid not in changed_set]
+        else:
+            new_group_ids = list(dict.fromkeys(existing_group_ids + changed_ids))  # union, de-duped, order kept
+
+        target_site_id = (plan.get("target_site") or {}).get("id")
+
+        body = {"name": plan.get("name", name), "description": plan.get("description", ""),
+                 "group_ids": new_group_ids, "target_site_id": target_site_id}
+        ers.api.patch(PLANS_PATH, params={"deployment_id": ers.deployment_id}, body=body)
+
+        verb = "Removed" if removing else "Added"
+        prep = "from" if removing else "to"
+        ers.output.out(f"{verb} group(s) {', '.join(group_names)} {prep} plan '{name}'")
+        ers.output.out_json("plan_group_ids", new_group_ids)
+        return new_group_ids
+
+    # -- delete ---------------------------------------------------------------
+    def delete(self, *names: str, with_wildcard: bool = False):
+        """
+        Deletes one or more recovery plans by name.
+
+        Without with_wildcard: each of *names is an exact plan name.
+        With with_wildcard: expects exactly one '*'-wildcard pattern in
+        *names; every plan whose name matches gets deleted.
+        """
+        ers = self._ers
+
+        if with_wildcard:
+            if len(names) != 1:
+                raise ValueError(f"with_wildcard expects exactly one pattern, "
+                                  f"got {len(names)}: {names!r}")
+            pattern = names[0]
+            data = ers.api.get(PLANS_PATH, params={"offset": 0, "limit": 300,
+                                                    "deployment_id": ers.deployment_id})
+            all_items = data.get("items") or []
+            matched = [p for p in all_items if fnmatch.fnmatch(p.get("name", ""), pattern)]
+            if not matched:
+                ers.output.out(f"No plans matched pattern '{pattern}' — nothing to delete.")
+                return []
+        else:
+            matched, not_found = self._resolve(list(names))
+            if not_found:
+                ers.output.out(f"Warning: Plans not found: {', '.join(not_found)}")
+            if not matched:
+                ers.output.out("No matching plans found — nothing to delete.")
+                return []
+
+        ids = [p["id"] for p in matched]
+        matched_names = [p.get("name", "-") for p in matched]
+
+        ers.api.delete(PLANS_PATH, params={"deployment_id": ers.deployment_id, "ids": ",".join(ids)})
+
+        for n in matched_names:
+            ers.output.out(f"Deleted plan '{n}'")
+        ers.output.out_json("deleted_plans", matched_names)
+        return matched_names
 
     def _latest_snapshot_ids(self, plan_id: str):
         ers = self._ers

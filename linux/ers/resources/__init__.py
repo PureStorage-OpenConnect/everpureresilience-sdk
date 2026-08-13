@@ -1,4 +1,4 @@
-# Copyright 2026 [Your Organization]
+# Copyright 2026 Everpure™
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -16,5 +16,6 @@ from .group import GroupResource
 from .plan import PlanResource
 from .site import SiteResource
 from .policy import PolicyResource
+from .vm import VmResource
 
-__all__ = ["GroupResource", "PlanResource", "SiteResource", "PolicyResource"]
+__all__ = ["GroupResource", "PlanResource", "SiteResource", "PolicyResource", "VmResource"]

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# Copyright 2026 [Your Organization]
+# Copyright 2026 Everpure™
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -27,57 +27,66 @@ sections for vCenter/other infra). Use --profile to select a non-default
 ~/.ers/config profile.
 
 examples:
-  ers-cli --list policies|groups|plans|sites --names ... --details --limit 50
-  ers-cli --group run --names group_name1,group_name2
-  ers-cli --group create --name "group-name-1" --with-policy "policy name" \
-             --source-site site1-name --target-site site2-name
-  ers-cli --group enable --name "group1,group2"
-  ers-cli --group disable --name "group1*" --with-wildcard
-  ers-cli --group delete --name "group1,group2"
-  ers-cli --group delete --name "group1*" --with-wildcard
-  ers-cli --monitor group|plan --names group_name1,plan_name1
-  ers-cli --profile staging --list groups
 
-  # Test failover — auto picks latest snapshot per group
-  ers-cli --plan failover --type test --names plan_name1,plan_name2
+  --list -- list a resource
+  ers-cli --list policies|groups|plans|sites|snapshots --names ... --details --limit 50
+  ers-cli --list vms --with-site site1
 
-  # Prod failover
-  ers-cli --plan failover --type prod --names plan_name1
-
-  # Cleanup after test failover
-  ers-cli --plan cleanup --names plan_name1
-
-  # Create a service level policy (rpo in minutes, retention/rto in hours)
-  ers-cli --policy create --name "policy name" --rpo 15 --target-type vmw \
-             --local-retention 24 --remote-retention 72
-
-  # Delete policies by exact name (comma-separated)
-  ers-cli --policy delete --name "policy name1, policy name2"
-
-  # Delete policies by a wildcard name pattern
-  ers-cli --policy delete --name "policy-name-prefix*" --with-wildcard
-
-  # Failback — only runs if prod_failover SUCCEEDED, requires --site
-  ers-cli --plan failback --names plan_name1 --site DC.DEV
-
-  # Managed failover/failback across two registered sites
-  ers-cli --managed-failover --from prod-dc --to dr-dc \\
-             --vms-file vm-list.json --group-names G1,G2 --plan-names P1,P2 \\
-             --with-tags --create-missing-tags --dry-run
-  ers-cli --managed-failback --from dr-dc --to prod-dc \\
-             --vms-file vm-list.json --group-names G1,G2 --plan-names P1,P2
-
-  # Direct site actions — power, network, and tags, without a full managed workflow
+  --site -- direct actions against a registered vCenter site
   ers-cli --site prod-dc --power off --vms-file vm-list.json
-  ers-cli --site prod-dc --power off --names vm-1,vm-2
+  ers-cli --site prod-dc --power off --names vm1,vm2
   ers-cli --site prod-dc --power on  --vms-file vm-list.json
   ers-cli --site dr-dc   --connect-networks --vms-file vm-list.json
   ers-cli --site prod-dc --export-tags --vms-file vm-list.json
   ers-cli --site dr-dc   --apply-tags --source prod-dc \\
              --vms-file vm-list.json --create-missing-tags
+  ers-cli --site prod-dc --list-networks    # diagnose "network not found" errors
 
-  # Diagnose "network not found" errors — see exactly what's visible
-  ers-cli --site prod-dc --list-networks
+  --policy -- service level policies
+  ers-cli --policy create --name policy1 --rpo 15 --target-type vmw \\
+             --local-retention 24 --remote-retention 72
+  ers-cli --policy delete --names policy1,policy2
+  ers-cli --policy delete --names "policy*"
+
+  --group -- application groups
+  ers-cli --group create --name group1 --with-policy policy1 \\
+             --source-site site1 --target-site site2
+  ers-cli --group enable --names group1,group2
+  ers-cli --group disable --names "group1*"
+  ers-cli --group run --names group1,group2
+  ers-cli --group delete --names group1,group2
+  ers-cli --group delete --names "group1*"
+
+  --vm -- enroll/unenroll VMs in an application group
+  ers-cli --vm add --names vm1,vm2 --with-group group1
+  ers-cli --vm add --names vm1,vm2 --with-group group1 --with-type VADP
+  ers-cli --vm add --names "vm*" --with-group group1
+  ers-cli --vm remove --names vm1,vm2 --with-group group1
+  ers-cli --vm remove --names "vm*" --with-group group1
+
+  --plan -- recovery plans
+  ers-cli --plan create --name plan1 --with-groups group1,group2 --target-site site1
+  ers-cli --plan add --names plan1 --with-groups group1,group2
+  ers-cli --plan remove --names plan1 --with-groups group1,group2
+  ers-cli --plan delete --names plan1,plan2
+  ers-cli --plan delete --names "plan*"
+  ers-cli --plan failover --type test --names plan1,plan2   # auto picks latest snapshot per group
+  ers-cli --plan failover --type prod --names plan1
+  ers-cli --plan cleanup --names plan1
+  ers-cli --plan failback --names plan1 --site DC.DEV   # only runs if prod_failover SUCCEEDED
+
+  --managed-failover -- orchestrated failover across two registered sites
+  ers-cli --managed-failover --from prod-dc --to dr-dc \\
+             --vms-file vm-list.json --group-names group1,group2 --plan-names plan1,plan2 \\
+             --with-tags --create-missing-tags --dry-run
+
+  --managed-failback -- orchestrated failback across two registered sites
+  ers-cli --managed-failback --from dr-dc --to prod-dc \\
+             --vms-file vm-list.json --group-names group1,group2 --plan-names plan1,plan2
+
+  other
+  ers-cli --monitor group|plan --names group1,plan1
+  ers-cli --profile staging --list groups
 """
 
 import argparse
@@ -104,17 +113,20 @@ def main():
     parser.add_argument("--limit", type=int, default=25, help="Max results (default: 25)")
     parser.add_argument("--details", action="store_true", help="Show detailed output")
     parser.add_argument("--names", metavar="NAME1,NAME2", help="Comma-separated names")
+    parser.add_argument("--name", metavar="NAME",
+                         help="A single name — used with --policy/--group/--plan create, "
+                              "which each always create exactly one resource")
 
     parser.add_argument("--list", metavar="RESOURCE",
-                         help="List a resource: policies, groups, plans, sites, snapshots")
+                         help="List a resource: policies, groups, plans, sites, snapshots, vms")
+    parser.add_argument("--with-site", metavar="SITE_NAME", help="Site name, used with --list vms")
+    parser.add_argument("--vm", metavar="ACTION", help="VM action: add, remove")
+    parser.add_argument("--with-group", metavar="GROUP_NAME",
+                         help="Application group name, used with --vm add/remove")
+    parser.add_argument("--with-type", metavar="FA_OFFLOAD|VADP", default="FA_OFFLOAD",
+                         help="Protection workflow (default: FA_OFFLOAD), used with --vm add")
     parser.add_argument("--group", metavar="ACTION", help="Group action: create, enable, disable, run, delete")
     parser.add_argument("--policy", metavar="ACTION", help="Policy action: create, delete")
-    parser.add_argument("--name", metavar="NAME",
-                         help="For create: a single name. For enable/disable/delete: comma-separated "
-                              "exact names, or a single '*'-wildcard pattern with --with-wildcard.")
-    parser.add_argument("--with-wildcard", action="store_true",
-                         help="Treat --name as a single '*'-wildcard pattern, used with "
-                              "--policy/--group delete (and --group enable/disable)")
     parser.add_argument("--with-policy", metavar="POLICY_NAME",
                          help="Service level policy name, used with --group create")
     parser.add_argument("--source-site", metavar="SITE_NAME",
@@ -134,7 +146,10 @@ def main():
                               "used with --policy create")
     parser.add_argument("--description", metavar="TEXT", default="",
                          help="Optional description, used with --policy create")
-    parser.add_argument("--plan", metavar="ACTION", help="Plan action: failover, cleanup, failback")
+    parser.add_argument("--plan", metavar="ACTION",
+                         help="Plan action: create, add, remove, delete, failover, cleanup, failback")
+    parser.add_argument("--with-groups", metavar="G1,G2",
+                         help="Comma-separated group names, used with --plan create/add/remove")
     parser.add_argument("--type", metavar="test|prod", help="Failover type, used with --plan failover")
     parser.add_argument("--snapshot-ids", metavar="ID1,ID2", help="Explicit snapshot set IDs")
     parser.add_argument("--site", metavar="SITE_NAME",
@@ -178,13 +193,15 @@ def main():
     site_action = any([args.power, args.connect_networks, args.export_tags, args.apply_tags,
                        args.list_networks])
 
-    if not any([args.list, args.group, args.policy, args.plan, args.monitor,
+    if not any([args.list, args.group, args.policy, args.vm, args.plan, args.monitor,
                 args.managed_failover, args.managed_failback, site_action]):
         parser.print_help()
         sys.exit(0)
 
     e = ers.instance(profile=args.profile)
     names = csv_list(args.names)
+    # Wildcard mode is inferred automatically from a literal '*' anywhere in --names.
+    wildcard = any("*" in n for n in names)
 
     if args.list:
         resource = args.list.lower()
@@ -198,9 +215,14 @@ def main():
             e.site.list(details=args.details, limit=args.limit)
         elif resource == "snapshots":
             e.plan.snapshots(*names)
+        elif resource == "vms":
+            if not args.with_site:
+                print("Error: --with-site is required with --list vms")
+                sys.exit(1)
+            e.vm.list(with_site=args.with_site, details=args.details)
         else:
             print(f"Error: Unknown resource '{resource}'. "
-                  f"Supported: policies, groups, plans, sites, snapshots")
+                  f"Supported: policies, groups, plans, sites, snapshots, vms")
             sys.exit(1)
 
     if args.group:
@@ -216,19 +238,18 @@ def main():
             e.group.create(name=args.name, with_policy=args.with_policy,
                             source_site=args.source_site, target_site=args.target_site)
         elif action in ("enable", "disable", "delete"):
-            if not args.name:
-                print(f"Error: --name is required with --group {action}")
+            if not names:
+                print(f"Error: --names is required with --group {action}")
                 sys.exit(1)
-            if args.with_wildcard:
-                target_names = (args.name,)
-            else:
-                target_names = tuple(n.strip() for n in args.name.split(",") if n.strip())
+            if wildcard and len(names) != 1:
+                print("Error: a wildcard pattern in --names must be the only value given")
+                sys.exit(1)
             if action == "enable":
-                e.group.enable(*target_names, with_wildcard=args.with_wildcard)
+                e.group.enable(*names, with_wildcard=wildcard)
             elif action == "disable":
-                e.group.disable(*target_names, with_wildcard=args.with_wildcard)
+                e.group.disable(*names, with_wildcard=wildcard)
             else:
-                e.group.delete(*target_names, with_wildcard=args.with_wildcard)
+                e.group.delete(*names, with_wildcard=wildcard)
         elif action == "run":
             if not names:
                 print("Error: --names is required with --group run")
@@ -254,40 +275,94 @@ def main():
                              estimated_rto_hours=args.estimated_rto,
                              description=args.description)
         elif action == "delete":
-            if not args.name:
-                print("Error: --name is required with --policy delete")
+            if not names:
+                print("Error: --names is required with --policy delete")
                 sys.exit(1)
-            if args.with_wildcard:
-                e.policy.delete(args.name, with_wildcard=True)
-            else:
-                names = [n.strip() for n in args.name.split(",") if n.strip()]
-                e.policy.delete(*names)
+            if wildcard and len(names) != 1:
+                print("Error: a wildcard pattern in --names must be the only value given")
+                sys.exit(1)
+            e.policy.delete(*names, with_wildcard=wildcard)
         else:
             print(f"Error: --policy must be create|delete, got '{args.policy}'")
             sys.exit(1)
 
+    if args.vm:
+        action = args.vm.lower()
+        if action not in ("add", "remove"):
+            print(f"Error: --vm must be add|remove, got '{args.vm}'")
+            sys.exit(1)
+        if not args.with_group:
+            print(f"Error: --with-group is required with --vm {action}")
+            sys.exit(1)
+        if wildcard:
+            if not names or len(names) != 1:
+                print("Error: a wildcard pattern in --names must be the only value given")
+                sys.exit(1)
+            vm_names = tuple(names)
+        else:
+            if not names:
+                print(f"Error: --names is required with --vm {action}")
+                sys.exit(1)
+            vm_names = tuple(names)
+        if action == "add":
+            e.vm.add(*vm_names, with_group=args.with_group, with_type=args.with_type,
+                     with_wildcard=wildcard)
+        else:
+            e.vm.remove(*vm_names, with_group=args.with_group, with_wildcard=wildcard)
+
     if args.plan:
         action = args.plan.lower()
-        if not names:
-            print("Error: --names is required with --plan")
-            sys.exit(1)
-        snap_ids = csv_list(args.snapshot_ids) if args.snapshot_ids else None
-        if action == "failover":
-            if not args.type:
-                print("Error: --type test|prod is required with --plan failover")
+
+        if action == "create":
+            if not args.name:
+                print("Error: --plan create requires --name")
                 sys.exit(1)
-            e.plan.failover(args.type, *names, snapshot_ids=snap_ids,
-                             interval=args.interval, max_polls=args.max_polls)
-        elif action == "cleanup":
-            e.plan.cleanup(*names, interval=args.interval, max_polls=args.max_polls)
-        elif action == "failback":
-            if not args.site:
-                print("Error: --site is required with --plan failback")
+            if not args.with_groups or not args.target_site:
+                print("Error: --plan create requires --with-groups and --target-site")
                 sys.exit(1)
-            e.plan.failback(*names, site=args.site, snapshot_ids=snap_ids,
-                             interval=args.interval, max_polls=args.max_polls)
+            group_names = csv_list(args.with_groups)
+            e.plan.create(name=args.name, with_groups=group_names, target_site=args.target_site,
+                           description=args.description)
+        elif action in ("add", "remove", "delete", "failover", "cleanup", "failback"):
+            if not names:
+                print("Error: --names is required with --plan")
+                sys.exit(1)
+            if action in ("add", "remove"):
+                if len(names) != 1:
+                    print(f"Error: --plan {action} requires exactly one name via --names")
+                    sys.exit(1)
+                if not args.with_groups:
+                    print(f"Error: --plan {action} requires --with-groups")
+                    sys.exit(1)
+                group_names = csv_list(args.with_groups)
+                if action == "add":
+                    e.plan.add(names[0], group_names)
+                else:
+                    e.plan.remove(names[0], group_names)
+            elif action == "delete":
+                if wildcard and len(names) != 1:
+                    print("Error: a wildcard pattern in --names must be the only value given")
+                    sys.exit(1)
+                e.plan.delete(*names, with_wildcard=wildcard)
+            elif action == "failover":
+                if not args.type:
+                    print("Error: --type test|prod is required with --plan failover")
+                    sys.exit(1)
+                snap_ids = csv_list(args.snapshot_ids) if args.snapshot_ids else None
+                e.plan.failover(args.type, *names, snapshot_ids=snap_ids,
+                                 interval=args.interval, max_polls=args.max_polls)
+            elif action == "cleanup":
+                e.plan.cleanup(*names, interval=args.interval, max_polls=args.max_polls)
+            elif action == "failback":
+                if not args.site:
+                    print("Error: --site is required with --plan failback")
+                    sys.exit(1)
+                snap_ids = csv_list(args.snapshot_ids) if args.snapshot_ids else None
+                e.plan.failback(*names, site=args.site, snapshot_ids=snap_ids,
+                                 interval=args.interval, max_polls=args.max_polls)
         else:
-            print(f"Error: --plan must be failover|cleanup|failback, got '{args.plan}'")
+            print(f"Error: --plan must be create|add|remove|delete|failover|cleanup|failback, "
+                  f"got '{args.plan}'")
             sys.exit(1)
 
     if args.monitor:
