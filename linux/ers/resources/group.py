@@ -14,10 +14,13 @@
 
 """ers.resources.group — ErsInstance.group.* namespace."""
 
+import fnmatch
 import json
 
 from .. import formatting
 from ..config import state_path
+from .policy import POLICIES_PATH
+from .site import SITES_PATH
 
 GROUPS_PATH   = "/pure-protect/api/1.latest/application-groups"
 PROTECT_PATH  = "/pure-protect/api/1.latest/application-groups/protection/operations"
@@ -65,30 +68,138 @@ class GroupResource:
         not_found = [n for n in names if n.lower() not in [g.get("name", "").lower() for g in matched]]
         return matched, not_found
 
-    # -- enable / disable -------------------------------------------------
-    def enable(self, *names):
-        return self._toggle(names, enable=True)
-
-    def disable(self, *names):
-        return self._toggle(names, enable=False)
-
-    def _toggle(self, names, enable: bool):
+    def _resolve_wildcard(self, pattern):
         ers = self._ers
-        matched, not_found = self._resolve(names)
-        if not_found:
-            ers.output.out(f"Warning: Groups not found: {', '.join(not_found)}")
-        if not matched:
-            ers.output.out("No matching groups found — nothing to update.")
-            return []
+        data = ers.api.get(GROUPS_PATH, params={"offset": 0, "limit": 1000,
+                                                 "deployment_id": ers.deployment_id})
+        items = data.get("items") or data.get("data") or []
+        return [g for g in items if fnmatch.fnmatch(g.get("name", ""), pattern)]
 
-        results = []
-        for group in matched:
-            body = {"protection_state": "ENABLED" if enable else "DISABLED"}
-            ers.api.patch(f"{GROUPS_PATH}/{group['id']}",
-                          params={"deployment_id": ers.deployment_id}, body=body)
-            ers.output.out(f"  {group['name']}: {'enabled' if enable else 'disabled'}")
-            results.append(group["name"])
-        return results
+    # -- create -------------------------------------------------------------
+    def create(self, name: str, with_policy: str, source_site: str, target_site: str,
+               description: str = "", backup_start_time: int = 0,
+               is_consistency_group: bool = False, has_cloud_pre_conversion: bool = False,
+               has_parallel_boot: bool = True, is_infrastructure_group: bool = False,
+               domain_name: str = ""):
+        """
+        Create an application group. Resolves with_policy (a service level
+        policy name) and source_site/target_site (site names) to their
+        IDs for you.
+        """
+        ers = self._ers
+
+        policy_data = ers.api.get(POLICIES_PATH, params={"offset": 0, "limit": 1000,
+                                                          "deployment_id": ers.deployment_id})
+        policies = policy_data.get("items") or []
+        policy_match = next((p for p in policies if p.get("name", "").lower() == with_policy.lower()), None)
+        if not policy_match:
+            raise ValueError(f"Policy '{with_policy}' not found")
+
+        site_data = ers.api.get(SITES_PATH, params={"offset": 0, "limit": 1000,
+                                                     "deployment_id": ers.deployment_id})
+        sites = site_data.get("items") or []
+
+        def _resolve_site(site_name):
+            match = next((s for s in sites if s.get("name", "").lower() == site_name.lower()), None)
+            if not match:
+                raise ValueError(f"Site '{site_name}' not found")
+            return match["id"]
+
+        body = {
+            "name": name,
+            "description": description,
+            "backup_start_time": backup_start_time,
+            "is_consistency_group": is_consistency_group,
+            "has_cloud_pre_conversion": has_cloud_pre_conversion,
+            "has_parallel_boot": has_parallel_boot,
+            "service_level_policy_id": policy_match["id"],
+            "is_infrastructure_group": is_infrastructure_group,
+            "domain_name": domain_name,
+            "source_site_id": _resolve_site(source_site),
+            "target_site_ids": [_resolve_site(target_site)],
+        }
+
+        result = ers.api.post(GROUPS_PATH, params={"deployment_id": ers.deployment_id}, body=body)
+        items = result.get("items", [result]) if result else [{}]
+        item = items[0] if items else {}
+
+        ers.output.out(f"Created group '{name}' (id: {item.get('id', '-')})")
+        ers.output.out_json("created_group", item)
+        return item
+
+    # -- enable / disable -------------------------------------------------
+    def enable(self, *names, with_wildcard: bool = False):
+        return self._toggle(names, enable=True, with_wildcard=with_wildcard)
+
+    def disable(self, *names, with_wildcard: bool = False):
+        return self._toggle(names, enable=False, with_wildcard=with_wildcard)
+
+    def _toggle(self, names, enable: bool, with_wildcard: bool = False):
+        ers = self._ers
+
+        if with_wildcard:
+            if len(names) != 1:
+                raise ValueError(f"with_wildcard expects exactly one pattern, "
+                                  f"got {len(names)}: {names!r}")
+            matched = self._resolve_wildcard(names[0])
+            if not matched:
+                ers.output.out(f"No groups matched pattern '{names[0]}' — nothing to update.")
+                return []
+        else:
+            matched, not_found = self._resolve(names)
+            if not_found:
+                ers.output.out(f"Warning: Groups not found: {', '.join(not_found)}")
+            if not matched:
+                ers.output.out("No matching groups found — nothing to update.")
+                return []
+
+        ids = [g["id"] for g in matched]
+        matched_names = [g["name"] for g in matched]
+
+        body = {"protection_state": "ENABLED" if enable else "DISABLED"}
+        ers.api.patch(GROUPS_PATH, params={"deployment_id": ers.deployment_id, "ids": ",".join(ids)},
+                      body=body)
+
+        for n in matched_names:
+            ers.output.out(f"  {n}: {'enabled' if enable else 'disabled'}")
+        return matched_names
+
+    # -- delete ---------------------------------------------------------------
+    def delete(self, *names, with_wildcard: bool = False):
+        """
+        Delete one or more application groups by name.
+
+        Without with_wildcard: each of *names is an exact group name.
+        With with_wildcard: expects exactly one '*'-wildcard pattern in
+        *names; every group whose name matches gets deleted.
+        """
+        ers = self._ers
+
+        if with_wildcard:
+            if len(names) != 1:
+                raise ValueError(f"with_wildcard expects exactly one pattern, "
+                                  f"got {len(names)}: {names!r}")
+            matched = self._resolve_wildcard(names[0])
+            if not matched:
+                ers.output.out(f"No groups matched pattern '{names[0]}' — nothing to delete.")
+                return []
+        else:
+            matched, not_found = self._resolve(names)
+            if not_found:
+                ers.output.out(f"Warning: Groups not found: {', '.join(not_found)}")
+            if not matched:
+                ers.output.out("No matching groups found — nothing to delete.")
+                return []
+
+        ids = [g["id"] for g in matched]
+        matched_names = [g["name"] for g in matched]
+
+        ers.api.delete(GROUPS_PATH, params={"deployment_id": ers.deployment_id, "ids": ",".join(ids)})
+
+        for n in matched_names:
+            ers.output.out(f"Deleted group '{n}'")
+        ers.output.out_json("deleted_groups", matched_names)
+        return matched_names
 
     # -- run --------------------------------------------------------------
     def run(self, *names):

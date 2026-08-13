@@ -29,6 +29,12 @@ sections for vCenter/other infra). Use --profile to select a non-default
 examples:
   ers-cli --list policies|groups|plans|sites --names ... --details --limit 50
   ers-cli --group run --names group_name1,group_name2
+  ers-cli --group create --name "group-name-1" --with-policy "policy name" \
+             --source-site site1-name --target-site site2-name
+  ers-cli --group enable --name "group1,group2"
+  ers-cli --group disable --name "group1*" --with-wildcard
+  ers-cli --group delete --name "group1,group2"
+  ers-cli --group delete --name "group1*" --with-wildcard
   ers-cli --monitor group|plan --names group_name1,plan_name1
   ers-cli --profile staging --list groups
 
@@ -44,6 +50,12 @@ examples:
   # Create a service level policy (rpo in minutes, retention/rto in hours)
   ers-cli --policy create --name "policy name" --rpo 15 --target-type vmw \
              --local-retention 24 --remote-retention 72
+
+  # Delete policies by exact name (comma-separated)
+  ers-cli --policy delete --name "policy name1, policy name2"
+
+  # Delete policies by a wildcard name pattern
+  ers-cli --policy delete --name "policy-name-prefix*" --with-wildcard
 
   # Failback — only runs if prod_failover SUCCEEDED, requires --site
   ers-cli --plan failback --names plan_name1 --site DC.DEV
@@ -95,9 +107,20 @@ def main():
 
     parser.add_argument("--list", metavar="RESOURCE",
                          help="List a resource: policies, groups, plans, sites, snapshots")
-    parser.add_argument("--group", metavar="enable|disable|run", help="Group action")
-    parser.add_argument("--policy", metavar="ACTION", help="Policy action: create")
-    parser.add_argument("--name", metavar="NAME", help="Policy name, used with --policy create")
+    parser.add_argument("--group", metavar="ACTION", help="Group action: create, enable, disable, run, delete")
+    parser.add_argument("--policy", metavar="ACTION", help="Policy action: create, delete")
+    parser.add_argument("--name", metavar="NAME",
+                         help="For create: a single name. For enable/disable/delete: comma-separated "
+                              "exact names, or a single '*'-wildcard pattern with --with-wildcard.")
+    parser.add_argument("--with-wildcard", action="store_true",
+                         help="Treat --name as a single '*'-wildcard pattern, used with "
+                              "--policy/--group delete (and --group enable/disable)")
+    parser.add_argument("--with-policy", metavar="POLICY_NAME",
+                         help="Service level policy name, used with --group create")
+    parser.add_argument("--source-site", metavar="SITE_NAME",
+                         help="Source site name, used with --group create")
+    parser.add_argument("--target-site", metavar="SITE_NAME",
+                         help="Target site name, used with --group create")
     parser.add_argument("--rpo", type=int, metavar="MINUTES",
                          help="RPO in minutes (0 allowed), used with --policy create")
     parser.add_argument("--target-type", metavar="vmw|aws",
@@ -182,17 +205,37 @@ def main():
 
     if args.group:
         action = args.group.lower()
-        if not names:
-            print("Error: --names is required with --group")
-            sys.exit(1)
-        if action == "enable":
-            e.group.enable(*names)
-        elif action == "disable":
-            e.group.disable(*names)
+        if action == "create":
+            missing = [flag for flag, val in [
+                ("--name", args.name), ("--with-policy", args.with_policy),
+                ("--source-site", args.source_site), ("--target-site", args.target_site),
+            ] if val is None]
+            if missing:
+                print(f"Error: --group create requires {', '.join(missing)}")
+                sys.exit(1)
+            e.group.create(name=args.name, with_policy=args.with_policy,
+                            source_site=args.source_site, target_site=args.target_site)
+        elif action in ("enable", "disable", "delete"):
+            if not args.name:
+                print(f"Error: --name is required with --group {action}")
+                sys.exit(1)
+            if args.with_wildcard:
+                target_names = (args.name,)
+            else:
+                target_names = tuple(n.strip() for n in args.name.split(",") if n.strip())
+            if action == "enable":
+                e.group.enable(*target_names, with_wildcard=args.with_wildcard)
+            elif action == "disable":
+                e.group.disable(*target_names, with_wildcard=args.with_wildcard)
+            else:
+                e.group.delete(*target_names, with_wildcard=args.with_wildcard)
         elif action == "run":
+            if not names:
+                print("Error: --names is required with --group run")
+                sys.exit(1)
             e.group.run(*names)
         else:
-            print(f"Error: --group must be enable|disable|run, got '{args.group}'")
+            print(f"Error: --group must be create|enable|disable|run|delete, got '{args.group}'")
             sys.exit(1)
 
     if args.policy:
@@ -210,8 +253,17 @@ def main():
                              remote_retention_hours=args.remote_retention,
                              estimated_rto_hours=args.estimated_rto,
                              description=args.description)
+        elif action == "delete":
+            if not args.name:
+                print("Error: --name is required with --policy delete")
+                sys.exit(1)
+            if args.with_wildcard:
+                e.policy.delete(args.name, with_wildcard=True)
+            else:
+                names = [n.strip() for n in args.name.split(",") if n.strip()]
+                e.policy.delete(*names)
         else:
-            print(f"Error: --policy must be create, got '{args.policy}'")
+            print(f"Error: --policy must be create|delete, got '{args.policy}'")
             sys.exit(1)
 
     if args.plan:

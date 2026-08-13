@@ -132,6 +132,21 @@ class ApiClient:
         except requests.ConnectionError:
             raise ApiError(f"Could not connect to {self.base_url}")
 
+    def delete(self, path: str, params: dict = None) -> dict:
+        """DELETE — takes query params (e.g. deployment_id, ids), no body,
+        matching this API's delete convention (?deployment_id=...&ids=...)."""
+        url = f"{self.base_url}{path}"
+        _debug_request("DELETE", url, params, None)
+        try:
+            response = requests.delete(url, headers=self._headers(), params=params)
+            _debug_response(response)
+            response.raise_for_status()
+            return response.json() if response.content else {}
+        except requests.HTTPError:
+            raise ApiError(f"HTTP error {response.status_code}: {response.text}")
+        except requests.ConnectionError:
+            raise ApiError(f"Could not connect to {self.base_url}")
+
 
 def poll_until_terminal(api: ApiClient, deployment_id: str, path: str, op_id: str,
                          label: str, interval: int, max_polls: int,
