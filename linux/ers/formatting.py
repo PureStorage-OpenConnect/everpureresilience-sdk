@@ -111,20 +111,20 @@ def print_groups_detailed(items: list):
         print(f"  {'Protection Triggerable':<26}: {group.get('is_protection_triggerable', False)}")
         policy = group.get("service_level_policy", {})
         if policy:
-            print(f"  {'Service Level Policy':<26}: {policy.get('name', '-')}  (id: {policy.get('id', '-')})")
+            print(f"  {'Service Level Policy':<26}: {policy.get('id', '-')}  (name: {policy.get('name', '-')})")
         source = group.get("source_site", {})
         if source:
-            print(f"  {'Source Site':<26}: id: {source.get('id', '-')}")
+            print(f"  {'Source Site':<26}: {source.get('id', '-')}  (name: {source.get('name', '-')})")
         targets = group.get("target_sites", [])
         if targets:
             print(f"  {'Target Sites':<26}:")
             for t in targets:
-                print(f"    - id: {t.get('id', '-')}")
+                print(f"    - {t.get('id', '-')}  (name: {t.get('name', '-')})")
         vms = group.get("enrolled_virtual_machines", [])
         if vms:
             print(f"  {'Enrolled VMs':<26}: {len(vms)} enrolled")
             for vm in vms:
-                print(f"    - id: {vm.get('id', '-')}")
+                print(f"    - {vm.get('id', '-')}  (name: {vm.get('name', '-')})")
 
 
 # ---------------------------------------------------------------------------
@@ -152,12 +152,12 @@ def print_plans_detailed(items: list):
         print(f"  {'Failback Triggerable':<26}: {'Yes' if plan.get('is_failback_triggerable') else 'No'}")
         target = plan.get("target_site", {})
         if target:
-            print(f"  {'Target Site':<26}: id: {target.get('id', '-')}")
+            print(f"  {'Target Site':<26}: {target.get('id', '-')}  (name: {target.get('name', '-')})")
         groups = plan.get("groups", [])
         if groups:
             print(f"  {'Groups':<26}: {len(groups)} assigned")
             for g in groups:
-                print(f"    - id: {g.get('id', '-')}")
+                print(f"    - {g.get('id', '-')}  (name: {g.get('name', '-')})")
         else:
             print(f"  {'Groups':<26}: none assigned")
 
@@ -199,7 +199,7 @@ def print_sites_detailed(items: list):
         if flash_arrays:
             print(f"  {'Flash Arrays':<18}:")
             for fa in flash_arrays:
-                print(f"    - {fa.get('name', '-')}  (id: {fa.get('id', '-')})")
+                print(f"    - {fa.get('id', '-')}  (name: {fa.get('name', '-')})")
 
 
 # ---------------------------------------------------------------------------
@@ -209,7 +209,7 @@ def print_sites_detailed(items: list):
 def print_snapshots(plan_name: str, plan_id: str, items: list, total: int, out):
     import datetime
     out(f"\n{'='*70}")
-    out(f"  Plan : {plan_name}  (id: {plan_id})")
+    out(f"  Plan : {plan_id}  (name: {plan_name})")
     out(f"  Total snapshots: {total}")
     out(f"{'='*70}")
     if not items:

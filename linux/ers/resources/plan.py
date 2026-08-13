@@ -71,6 +71,7 @@ class PlanResource:
         if ers.output.format == "json":
             ers.output.out_json("plans", items)
         elif details:
+            self._enrich_names(items)
             formatting.print_plans_detailed(items)
         else:
             formatting.print_plans_summary(items)
@@ -116,6 +117,37 @@ class PlanResource:
         if not_found:
             raise ValueError(f"Groups not found: {', '.join(not_found)}")
         return [g["id"] for g in matched]
+
+    def _site_name_map(self) -> dict:
+        ers = self._ers
+        data = ers.api.get(SITES_PATH, params={"offset": 0, "limit": 300,
+                                                "deployment_id": ers.deployment_id})
+        return {s["id"]: s.get("name") for s in (data.get("items") or []) if s.get("id")}
+
+    def _group_name_map(self) -> dict:
+        ers = self._ers
+        data = ers.api.get(GROUPS_PATH, params={"offset": 0, "limit": 300,
+                                                 "deployment_id": ers.deployment_id})
+        return {g["id"]: g.get("name") for g in (data.get("items") or []) if g.get("id")}
+
+    def _enrich_names(self, plans: list):
+        """
+        Plan objects' own nested target_site/groups references come back
+        with a placeholder "N/A" name from the recovery-plans endpoint —
+        SITES_PATH and GROUPS_PATH return the real names, so cross-
+        reference those (fetched once, not per-plan) and patch them in
+        before display. Only called for --details, since it costs two
+        extra API calls the plain summary view doesn't need.
+        """
+        site_names = self._site_name_map()
+        group_names = self._group_name_map()
+        for plan in plans:
+            target = plan.get("target_site")
+            if target and target.get("id") in site_names:
+                target["name"] = site_names[target["id"]]
+            for g in (plan.get("groups") or []):
+                if g.get("id") in group_names:
+                    g["name"] = group_names[g["id"]]
 
     # -- create -----------------------------------------------------------
     def create(self, name: str, with_groups, target_site: str, description: str = ""):

@@ -26,6 +26,11 @@ GROUPS_PATH   = "/pure-protect/api/1.latest/application-groups"
 PROTECT_PATH  = "/pure-protect/api/1.latest/application-groups/protection/operations"
 LAST_RUN_OPS  = "last_run_ops.json"
 
+# Duplicated from vm.py's ENROLLED_VMS_PATH rather than imported — vm.py
+# already imports GROUPS_PATH from this file, so importing the reverse
+# direction would create a circular import.
+ENROLLED_VMS_PATH = "/pure-protect/api/1.latest/enrolled-virtual-machines"
+
 
 class GroupResource:
     def __init__(self, ers):
@@ -49,6 +54,7 @@ class GroupResource:
         if ers.output.format == "json":
             ers.output.out_json("groups", items)
         elif details:
+            self._enrich_names(items)
             formatting.print_groups_detailed(items)
         else:
             formatting.print_groups_summary(items)
@@ -74,6 +80,67 @@ class GroupResource:
                                                  "deployment_id": ers.deployment_id})
         items = data.get("items") or data.get("data") or []
         return [g for g in items if fnmatch.fnmatch(g.get("name", ""), pattern)]
+
+    def _site_name_map(self) -> dict:
+        ers = self._ers
+        data = ers.api.get(SITES_PATH, params={"offset": 0, "limit": 300,
+                                                "deployment_id": ers.deployment_id})
+        return {s["id"]: s.get("name") for s in (data.get("items") or []) if s.get("id")}
+
+    def _enrolled_vm_name_map(self, group_id: str) -> dict:
+        """
+        Confirmed real field for a VM's name here is nested under
+        primary_virtual_machine.name (see vm.py's _enrolled_name — same
+        shape, duplicated here to avoid a circular import). Passing an
+        empty search term to get "all enrolled VMs for this group" is
+        NOT confirmed against real API output — every example we've seen
+        used an actual search term. Verify with ERS_DEBUG=1 if this
+        doesn't return everything.
+        """
+        ers = self._ers
+        data = ers.api.get(ENROLLED_VMS_PATH, params={
+            "offset": 0, "limit": 300, "deployment_id": ers.deployment_id,
+            "application_group_ids": group_id, "search": "",
+        })
+        name_map = {}
+        for item in (data.get("items") or []):
+            item_id = item.get("id")
+            primary = item.get("primary_virtual_machine") or {}
+            name = primary.get("name")
+            if not name:
+                vms = item.get("virtual_machines") or []
+                if vms:
+                    name = vms[0].get("name")
+            if item_id and name:
+                name_map[item_id] = name
+        return name_map
+
+    def _enrich_names(self, groups: list):
+        """
+        A group's own nested source_site/target_sites/enrolled_virtual_machines
+        references come back with a placeholder "N/A" name from the
+        application-groups endpoint — SITES_PATH returns the real site
+        name (fetched once, not per-group); real VM names need a
+        separate per-group lookup, since enrollment is inherently scoped
+        to one group (see _enrolled_vm_name_map). Only called for
+        --details, since it costs extra API calls the plain summary view
+        doesn't need.
+        """
+        site_names = self._site_name_map()
+        for group in groups:
+            source = group.get("source_site")
+            if source and source.get("id") in site_names:
+                source["name"] = site_names[source["id"]]
+            for t in (group.get("target_sites") or []):
+                if t.get("id") in site_names:
+                    t["name"] = site_names[t["id"]]
+
+            vms = group.get("enrolled_virtual_machines") or []
+            if vms and group.get("id"):
+                vm_names = self._enrolled_vm_name_map(group["id"])
+                for vm in vms:
+                    if vm.get("id") in vm_names:
+                        vm["name"] = vm_names[vm["id"]]
 
     # -- create -------------------------------------------------------------
     def create(self, name: str, with_policy: str, source_site: str, target_site: str,
