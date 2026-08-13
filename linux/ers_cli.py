@@ -33,14 +33,14 @@ examples:
   ers-cli --list vms --with-site site1
 
   --site -- direct actions against a registered vCenter site
-  ers-cli --site prod-dc --power off --vms-file vm-list.json
-  ers-cli --site prod-dc --power off --names vm1,vm2
-  ers-cli --site prod-dc --power on  --vms-file vm-list.json
-  ers-cli --site dr-dc   --connect-networks --vms-file vm-list.json
-  ers-cli --site prod-dc --export-tags --vms-file vm-list.json
-  ers-cli --site dr-dc   --apply-tags --source prod-dc \\
+  ers-cli --site site1 --power off --vms-file vm-list.json
+  ers-cli --site site1 --power off --names vm1,vm2
+  ers-cli --site site1 --power on  --vms-file vm-list.json
+  ers-cli --site site2 --connect-networks --vms-file vm-list.json
+  ers-cli --site site1 --export-tags --vms-file vm-list.json
+  ers-cli --site site2 --apply-tags --source site1 \\
              --vms-file vm-list.json --create-missing-tags
-  ers-cli --site prod-dc --list-networks    # diagnose "network not found" errors
+  ers-cli --site site1 --list-networks    # diagnose "network not found" errors
 
   --policy -- service level policies
   ers-cli --policy create --name policy1 --rpo 15 --target-type vmw \\
@@ -73,15 +73,14 @@ examples:
   ers-cli --plan failover --type test --names plan1,plan2   # auto picks latest snapshot per group
   ers-cli --plan failover --type prod --names plan1
   ers-cli --plan cleanup --names plan1
-  ers-cli --plan failback --names plan1 --site DC.DEV   # only runs if prod_failover SUCCEEDED
+  ers-cli --plan failback --names plan1 --site site1   # only runs if prod_failover SUCCEEDED
 
-  --managed-failover -- orchestrated failover across two registered sites
-  ers-cli --managed-failover --from prod-dc --to dr-dc \\
+  --managed -- orchestrated failover/failback across two registered sites
+  ers-cli --managed failover --from site1 --to site2 \\
              --vms-file vm-list.json --group-names group1,group2 --plan-names plan1,plan2 \\
              --with-tags --create-missing-tags --dry-run
 
-  --managed-failback -- orchestrated failback across two registered sites
-  ers-cli --managed-failback --from dr-dc --to prod-dc \\
+  ers-cli --managed failback --from site2 --to site1 \\
              --vms-file vm-list.json --group-names group1,group2 --plan-names plan1,plan2
 
   other
@@ -174,8 +173,7 @@ def main():
     parser.add_argument("--source", metavar="SITE_NAME",
                          help="Site whose captured tag state to use, with --apply-tags")
 
-    parser.add_argument("--managed-failover", action="store_true")
-    parser.add_argument("--managed-failback", action="store_true")
+    parser.add_argument("--managed", metavar="ACTION", help="Managed workflow: failover, failback")
     parser.add_argument("--from", dest="from_site", metavar="SITE",
                          help="Source site name (already registered in credentials)")
     parser.add_argument("--to", dest="to_site", metavar="SITE",
@@ -194,7 +192,7 @@ def main():
                        args.list_networks])
 
     if not any([args.list, args.group, args.policy, args.vm, args.plan, args.monitor,
-                args.managed_failover, args.managed_failback, site_action]):
+                args.managed, site_action]):
         parser.print_help()
         sys.exit(0)
 
@@ -418,7 +416,11 @@ def main():
             target.apply_tags(*names, file=args.vms_file, source=args.source,
                                create_missing=args.create_missing_tags)
 
-    if args.managed_failover or args.managed_failback:
+    if args.managed:
+        action = args.managed.lower()
+        if action not in ("failover", "failback"):
+            print(f"Error: --managed must be failover|failback, got '{args.managed}'")
+            sys.exit(1)
         if not (args.from_site and args.to_site and args.vms_file
                 and args.group_names and args.plan_names):
             print("Error: --from, --to, --vms-file, --group-names, and --plan-names "
@@ -435,7 +437,7 @@ def main():
             create_missing_tags=args.create_missing_tags, dry_run=args.dry_run,
             interval=args.interval, max_polls=args.max_polls,
         )
-        if args.managed_failover:
+        if action == "failover":
             e.workflow.managed_failover(**kwargs)
         else:
             e.workflow.managed_failback(**kwargs)
