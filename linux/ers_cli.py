@@ -42,6 +42,20 @@ examples:
              --vms-file vm-list.json --create-missing-tags
   ers-cli --site site1 --list-networks    # diagnose "network not found" errors
 
+  # Clone a single VM from a template
+  ers-cli --site site1 --create-vm --name vm1 --template golden-template \\
+             --resource-pool Resources --datastore datastore1 --network "VM Network"
+
+  # Clone N VMs from a template (auto-numbered, e.g. ubuntu-tst-001, ubuntu-tst-002, ...)
+  ers-cli --site site1 --create-vm --name-prefix ubuntu-tst- --count 10 \\
+             --template golden-template --resource-pool Resources --datastore datastore1
+
+  # Delete a single VM (powers off first if running)
+  ers-cli --site site1 --delete-vm --name vm1
+
+  # Delete N VMs by name-prefix/count (same naming as --create-vm)
+  ers-cli --site site1 --delete-vm --name-prefix ubuntu-tst- --count 10
+
   --policy -- service level policies
   ers-cli --policy create --name policy1 --rpo 15 --target-type vmw \\
              --local-retention 24 --remote-retention 72
@@ -113,8 +127,9 @@ def main():
     parser.add_argument("--details", action="store_true", help="Show detailed output")
     parser.add_argument("--names", metavar="NAME1,NAME2", help="Comma-separated names")
     parser.add_argument("--name", metavar="NAME",
-                         help="A single name — used with --policy/--group/--plan create, "
-                              "which each always create exactly one resource")
+                         help="A single name — used with --policy/--group/--plan create and "
+                              "--create-vm (single-VM mode), which each always create exactly "
+                              "one resource")
 
     parser.add_argument("--list", metavar="RESOURCE",
                          help="List a resource: policies, groups, plans, sites, snapshots, vms")
@@ -166,12 +181,40 @@ def main():
     parser.add_argument("--list-networks", action="store_true",
                          help="Print every network name visible on --site — use this to "
                               "diagnose 'network not found' errors from --connect-networks")
+    parser.add_argument("--list-folders", action="store_true",
+                         help="Print every VM folder's full path visible on --site — use this "
+                              "to diagnose 'folder not found' errors from --create-vm")
     parser.add_argument("--export-tags", action="store_true",
                          help="Capture vSphere tags from VMs on --site (use with --vms-file or --names)")
     parser.add_argument("--apply-tags", action="store_true",
                          help="Apply vSphere tags to VMs on --site, captured from --source")
     parser.add_argument("--source", metavar="SITE_NAME",
                          help="Site whose captured tag state to use, with --apply-tags")
+
+    parser.add_argument("--create-vm", action="store_true",
+                         help="Clone VM(s) from a template on --site — a single VM via --name, "
+                              "or --count VMs via --name-prefix (zero-padded 3-digit numbering)")
+    parser.add_argument("--delete-vm", action="store_true",
+                         help="Delete VM(s) on --site — a single VM via --name, or --count VMs "
+                              "via --name-prefix (same naming as --create-vm). Powers off first "
+                              "if running, then destroys.")
+    parser.add_argument("--template", metavar="TEMPLATE_NAME", help="Template to clone from")
+    parser.add_argument("--resource-pool", metavar="POOL_NAME", default="Resources",
+                         help="Target resource pool (default: 'Resources', vCenter's standard "
+                              "name for a cluster/host's default root resource pool)")
+    parser.add_argument("--datastore", metavar="DATASTORE_NAME", help="Target datastore")
+    parser.add_argument("--network", metavar="NETWORK_NAME",
+                         help="Reconnect the clone's first NIC to this network (optional — "
+                              "otherwise it inherits the template's network)")
+    parser.add_argument("--folder", metavar="FOLDER_NAME",
+                         help="VM folder for the clone (optional — otherwise same folder as the template)")
+    parser.add_argument("--power-on", action="store_true",
+                         help="Power on the clone(s) immediately after creation (default: stay off)")
+    parser.add_argument("--name-prefix", metavar="PREFIX",
+                         help="Name prefix for --count VMs, e.g. 'ubuntu-tst-' -> ubuntu-tst-001, ...")
+    parser.add_argument("--count", type=int, metavar="N", help="Number of VMs to create from --name-prefix")
+    parser.add_argument("--start-index", type=int, default=1,
+                         help="First number used with --name-prefix (default: 1)")
 
     parser.add_argument("--managed", metavar="ACTION", help="Managed workflow: failover, failback")
     parser.add_argument("--from", dest="from_site", metavar="SITE",
@@ -189,7 +232,7 @@ def main():
     args = parser.parse_args()
 
     site_action = any([args.power, args.connect_networks, args.export_tags, args.apply_tags,
-                       args.list_networks])
+                       args.list_networks, args.list_folders, args.create_vm, args.delete_vm])
 
     if not any([args.list, args.group, args.policy, args.vm, args.plan, args.monitor,
                 args.managed, site_action]):
@@ -376,7 +419,7 @@ def main():
     if site_action:
         if not args.site:
             print("Error: --site is required with --power/--connect-networks/--export-tags/"
-                  "--apply-tags/--list-networks")
+                  "--apply-tags/--list-networks/--create-vm/--delete-vm")
             sys.exit(1)
         needs_vms = args.power or args.connect_networks or args.export_tags or args.apply_tags
         if needs_vms and not (args.vms_file or names):
@@ -392,6 +435,14 @@ def main():
                       "privileges on network objects.")
             for net_name in net_names:
                 print(f"{net_name}    {net_name.encode('unicode_escape')}")
+
+        if args.list_folders:
+            folder_paths = target.list_folders()
+            if not folder_paths:
+                print("No folders visible — check the connecting account's view "
+                      "privileges on folder objects.")
+            for path in folder_paths:
+                print(path)
 
         if args.power:
             action = args.power.lower()
@@ -415,6 +466,42 @@ def main():
                 sys.exit(1)
             target.apply_tags(*names, file=args.vms_file, source=args.source,
                                create_missing=args.create_missing_tags)
+
+        if args.create_vm:
+            if not (args.template and args.datastore):
+                print("Error: --create-vm requires --template and --datastore")
+                sys.exit(1)
+            batch_mode = bool(args.name_prefix or args.count)
+            if batch_mode:
+                if not (args.name_prefix and args.count):
+                    print("Error: batch VM creation requires both --name-prefix and --count")
+                    sys.exit(1)
+                target.create_vms(name_prefix=args.name_prefix, count=args.count,
+                                   template=args.template, resource_pool=args.resource_pool,
+                                   datastore=args.datastore, network=args.network,
+                                   folder=args.folder, power_on=args.power_on,
+                                   start_index=args.start_index)
+            else:
+                if not args.name:
+                    print("Error: --create-vm without --name-prefix/--count requires --name")
+                    sys.exit(1)
+                target.create_vm(name=args.name, template=args.template,
+                                  resource_pool=args.resource_pool, datastore=args.datastore,
+                                  network=args.network, folder=args.folder, power_on=args.power_on)
+
+        if args.delete_vm:
+            batch_mode = bool(args.name_prefix or args.count)
+            if batch_mode:
+                if not (args.name_prefix and args.count):
+                    print("Error: batch VM deletion requires both --name-prefix and --count")
+                    sys.exit(1)
+                target.delete_vms(name_prefix=args.name_prefix, count=args.count,
+                                   start_index=args.start_index)
+            else:
+                if not args.name:
+                    print("Error: --delete-vm without --name-prefix/--count requires --name")
+                    sys.exit(1)
+                target.delete_vm(name=args.name)
 
     if args.managed:
         action = args.managed.lower()

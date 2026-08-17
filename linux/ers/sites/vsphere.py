@@ -573,6 +573,287 @@ class VSphereSite(Site):
         return success
 
     # ------------------------------------------------------------------
+    # VM creation (clone from template)
+    # ------------------------------------------------------------------
+
+    def _find_in_inventory(self, vim_type, name: str):
+        """Generic by-name lookup for a single vCenter object type
+        (resource pool, datastore, template VM, ...) — same
+        container-view approach as _find_network_in_inventory, minus its
+        network-specific fuzzy-matching (templates/pools/datastores don't
+        have the same DVS-vs-standard or lookalike-Unicode footguns that
+        motivated that extra logic for networks).
+
+        Flat, whole-inventory search — matches the first object with this
+        exact name anywhere in the tree. Fine for resource pools/
+        datastores/templates, which are rarely duplicated by name across
+        an inventory, but NOT hierarchy-aware — if the same name exists
+        in more than one place, this can silently return the wrong one.
+        Folders specifically use _find_folder_by_path instead, since
+        folders are exactly the case where same-named-but-different
+        objects at different nesting levels is common (e.g. a per-user
+        subfolder name reused under multiple parents)."""
+        content = self.si.RetrieveContent()
+        container = content.viewManager.CreateContainerView(content.rootFolder, [vim_type], True)
+        try:
+            for obj in container.view:
+                if obj.name == name:
+                    return obj
+        finally:
+            container.Destroy()
+        return None
+
+    def _find_folder_by_path(self, path: str):
+        """
+        Resolve a folder by path, e.g. '/Dev/smadhu1' or 'Dev/smadhu1'
+        (leading/trailing slashes optional) — walks the inventory tree
+        one path segment at a time, matching each segment's name exactly
+        at that level, so a folder named 'smadhu1' under 'Dev' can't be
+        confused with a different, same-named folder somewhere else in
+        the inventory.
+
+        A single segment with no '/' (e.g. just 'smadhu1') falls back to
+        the old flat, whole-inventory search for backward compatibility —
+        fine as long as that name is unique across your inventory; use
+        the full path if it isn't.
+
+        Datacenters are transparent in the path: vCenter's inventory tree
+        interleaves a Datacenter object between the root Folder and your
+        own folders (root -> Datacenter -> vmFolder -> Dev -> smadhu1),
+        but a path like '/Dev/smadhu1' doesn't name the datacenter at
+        all — matching how vCenter's own UI commonly shows folders
+        without the datacenter prefix. So at each level, this tries the
+        current segment against named children directly, AND tries
+        descending through any datacenter-like child (one with a
+        vmFolder) without consuming a path segment, in case the
+        datacenter's own name was omitted.
+        """
+        segments = [s for s in path.split("/") if s]
+        if not segments:
+            return None
+
+        all_folders = self._all_folders()
+        normalized = "/" + "/".join(segments)
+
+        if normalized in all_folders:
+            return all_folders[normalized]
+
+        if len(segments) == 1:
+            # Leaf-name-only: search anywhere in the tree for a folder
+            # with this name, regardless of nesting — convenient, but
+            # only safe if that name is unique across the whole
+            # inventory; use the full path if it isn't.
+            leaf = segments[0]
+            matches = [(p, f) for p, f in all_folders.items() if f.name == leaf]
+            if len(matches) == 1:
+                return matches[0][1]
+            if len(matches) > 1:
+                print(f"  Warning: '{leaf}' matches multiple folders: "
+                      f"{', '.join(p for p, _ in matches)} — use the full path to disambiguate.")
+                return None
+
+        # Case-insensitive / whitespace-trimmed fallback, segment by segment.
+        target_segments = [s.strip().lower() for s in segments]
+        for candidate_path, folder_obj in all_folders.items():
+            candidate_segments = [s.strip().lower() for s in candidate_path.split("/") if s]
+            if candidate_segments == target_segments:
+                print(f"  Warning: matched '{path}' to '{candidate_path}' only after ignoring "
+                      f"case/whitespace — fix the path to match vCenter exactly.")
+                return folder_obj
+
+        return None
+
+    def _all_folders(self) -> dict:
+        """
+        Single canonical traversal of the VM folder tree, used by BOTH
+        list_folders() and _find_folder_by_path() — having two separate
+        tree-walking implementations previously let them silently
+        disagree (list_folders() found a path _find_folder_by_path()
+        couldn't). Returns {full_path: folder_object}, e.g.
+        {'/Dev': <Folder>, '/Dev/smadhu1': <Folder>}.
+
+        Uses isinstance(node, vim.Datacenter) rather than
+        hasattr(node, 'vmFolder') to detect datacenters — a more
+        reliable check against pyVmomi's dynamically-typed SOAP proxy
+        objects, where hasattr's behavior on optional/type-dependent
+        properties is less predictable than an explicit type check.
+        """
+        content = self.si.RetrieveContent()
+        paths = {}
+
+        def walk(node, prefix):
+            if isinstance(node, vim.Datacenter):
+                walk(node.vmFolder, prefix)
+                return
+            for child in getattr(node, "childEntity", None) or []:
+                if isinstance(child, vim.Datacenter):
+                    walk(child, prefix)
+                    continue
+                if isinstance(child, vim.Folder):
+                    child_path = f"{prefix}/{child.name}"
+                    paths[child_path] = child
+                    walk(child, child_path)
+
+        walk(content.rootFolder, "")
+        return paths
+
+    def list_folders(self) -> list:
+        """Return every VM folder's full path visible to this site's
+        connection, e.g. ['/Dev', '/Dev/smadhu1', '/Prod'] — datacenter
+        names omitted. Use this to diagnose a '--folder ... not found'
+        error the same way --list-networks diagnoses a network mismatch:
+        confirms the exact spelling/case/nesting vCenter actually has,
+        and whether the connecting account can see folders at all (an
+        empty result here usually means a view-privilege problem, not a
+        naming problem). Derived from the exact same traversal
+        _find_folder_by_path() uses, so the two can never disagree."""
+        return sorted(self._all_folders().keys())
+
+    def create_vm(self, name: str, template: str, datastore: str,
+                   resource_pool: str = "Resources", network: str = None,
+                   folder: str = None, power_on: bool = False):
+        """Clones a single VM named `name` from an existing template.
+        resource_pool defaults to 'Resources', vCenter's standard name
+        for a cluster/host's default root resource pool."""
+        created = self._clone_from_template(names=[name], template=template,
+                                             resource_pool=resource_pool, datastore=datastore,
+                                             network=network, folder=folder, power_on=power_on)
+        return created[0] if created else None
+
+    def create_vms(self, name_prefix: str, count: int, template: str, datastore: str,
+                    resource_pool: str = "Resources", network: str = None, folder: str = None,
+                    power_on: bool = False, start_index: int = 1):
+        """Clones `count` VMs from an existing template, named
+        `<name_prefix><NNN>` — 3-digit, zero-padded, starting at
+        start_index (e.g. name_prefix='ubuntu-tst-' -> ubuntu-tst-001,
+        ubuntu-tst-002, ...). resource_pool defaults to 'Resources',
+        vCenter's standard name for a cluster/host's default root
+        resource pool."""
+        names = [f"{name_prefix}{i:03d}" for i in range(start_index, start_index + count)]
+        return self._clone_from_template(names=names, template=template,
+                                          resource_pool=resource_pool, datastore=datastore,
+                                          network=network, folder=folder, power_on=power_on)
+
+    def delete_vm(self, name: str):
+        """Deletes a single VM by name — powers it off first if it's
+        running, then destroys it (files and all)."""
+        deleted = self._delete_vms([name])
+        return name if name in deleted else None
+
+    def delete_vms(self, name_prefix: str, count: int, start_index: int = 1):
+        """Deletes VMs named `<name_prefix><NNN>` — same 3-digit,
+        zero-padded naming convention as create_vms, so the exact names
+        this generates match what create_vms would have created with the
+        same name_prefix/count/start_index."""
+        names = [f"{name_prefix}{i:03d}" for i in range(start_index, start_index + count)]
+        return self._delete_vms(names)
+
+    def _delete_vms(self, names: list) -> list:
+        vm_map = self._get_vms_by_names(names)
+        not_found = [n for n in names if n not in vm_map]
+        if not_found:
+            print(f"Warning: VMs not found: {', '.join(not_found)}")
+
+        deleted = []
+        for name in names:
+            vm = vm_map.get(name)
+            if not vm:
+                continue
+            try:
+                if vm.runtime.powerState == vim.VirtualMachine.PowerState.poweredOn:
+                    power_task = vm.PowerOffVM_Task()
+                    power_state = self._wait_for_task(power_task)
+                    if power_state != vim.TaskInfo.State.success:
+                        print(f"  {name}: FAILED to power off before delete (state {power_state})")
+                        continue
+                task = vm.Destroy_Task()
+                state = self._wait_for_task(task, timeout=300)
+                if state == vim.TaskInfo.State.success:
+                    print(f"  {name}: deleted")
+                    deleted.append(name)
+                else:
+                    error = getattr(task.info, "error", None)
+                    msg = error.msg if error else state
+                    print(f"  {name}: FAILED ({msg})")
+            except Exception as e:
+                print(f"  {name}: FAILED ({e})")
+
+        print(", ".join(deleted))
+        return deleted
+
+    def _clone_from_template(self, names: list, template: str, resource_pool: str,
+                              datastore: str, network: str, folder: str, power_on: bool):
+        # Templates are just VirtualMachine objects (config.template=True) —
+        # reuse the same PropertyCollector-based lookup power_on/off/delete
+        # already use, rather than the less-efficient CreateContainerView
+        # scan _find_in_inventory does. One targeted server round trip
+        # instead of enumerating every VM in the inventory.
+        template_map = self._get_vms_by_names([template])
+        template_vm = template_map.get(template)
+        if not template_vm:
+            print(f"Error: template '{template}' not found")
+            return []
+
+        pool = self._find_in_inventory(vim.ResourcePool, resource_pool)
+        if not pool:
+            print(f"Error: resource pool '{resource_pool}' not found")
+            return []
+
+        ds = self._find_in_inventory(vim.Datastore, datastore)
+        if not ds:
+            print(f"Error: datastore '{datastore}' not found")
+            return []
+
+        dest_folder = template_vm.parent
+        if folder:
+            found_folder = self._find_folder_by_path(folder)
+            if not found_folder:
+                print(f"Error: folder '{folder}' not found")
+                return []
+            dest_folder = found_folder
+
+        # Reuse the existing network resolution/backing logic from
+        # connect_networks() rather than duplicating it — same fuzzy
+        # matching, same lookalike-Unicode detection.
+        device_changes = []
+        if network:
+            net = self._find_network_in_inventory(network)
+            if not net:
+                print(f"Error: network '{network}' not found")
+                return []
+            for device in template_vm.config.hardware.device:
+                if isinstance(device, vim.vm.device.VirtualEthernetCard):
+                    nic_spec = vim.vm.device.VirtualDeviceSpec()
+                    nic_spec.operation = vim.vm.device.VirtualDeviceSpec.Operation.edit
+                    nic_spec.device = device
+                    nic_spec.device.backing = self._build_nic_backing(net)
+                    device_changes.append(nic_spec)
+                    break
+
+        reloc_spec = vim.vm.RelocateSpec(pool=pool, datastore=ds)
+        clone_spec = vim.vm.CloneSpec(location=reloc_spec, powerOn=power_on, template=False)
+        if device_changes:
+            clone_spec.config = vim.vm.ConfigSpec(deviceChange=device_changes)
+
+        created = []
+        for vm_name in names:
+            try:
+                task = template_vm.Clone(folder=dest_folder, name=vm_name, spec=clone_spec)
+                state = self._wait_for_task(task, timeout=600)  # clones take longer than power ops
+                if state == vim.TaskInfo.State.success:
+                    print(f"  {vm_name}: created")
+                    created.append(vm_name)
+                else:
+                    error = getattr(task.info, "error", None)
+                    msg = error.msg if error else state
+                    print(f"  {vm_name}: FAILED ({msg})")
+            except Exception as e:
+                print(f"  {vm_name}: FAILED ({e})")
+
+        print(", ".join(created))
+        return created
+
+    # ------------------------------------------------------------------
     # Tags (was vm-tag-mgr.py) — state file is transparent
     # ------------------------------------------------------------------
 
