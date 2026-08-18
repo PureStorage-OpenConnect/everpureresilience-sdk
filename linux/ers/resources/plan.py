@@ -200,11 +200,18 @@ class PlanResource:
         else:
             new_group_ids = list(dict.fromkeys(existing_group_ids + changed_ids))  # union, de-duped, order kept
 
-        target_site_id = (plan.get("target_site") or {}).get("id")
-
+        # Unlike create's POST body (which needs target_site_id), the PATCH
+        # body here must NOT include it — confirmed: including it gets a
+        # 400 "Failed to read HTTP message" even though the field is
+        # otherwise valid on this same endpoint for create. The plan being
+        # patched is identified via the &ids= query param (same pattern
+        # as DELETE and the group enable/disable PATCH), not by matching
+        # "name" in the body — confirmed: omitting it gets a 400
+        # "Missing 'ids' query parameter."
         body = {"name": plan.get("name", name), "description": plan.get("description", ""),
-                 "group_ids": new_group_ids, "target_site_id": target_site_id}
-        ers.api.patch(PLANS_PATH, params={"deployment_id": ers.deployment_id}, body=body)
+                 "group_ids": new_group_ids}
+        ers.api.patch(PLANS_PATH, params={"deployment_id": ers.deployment_id, "ids": plan["id"]},
+                      body=body)
 
         verb = "Removed" if removing else "Added"
         prep = "from" if removing else "to"
