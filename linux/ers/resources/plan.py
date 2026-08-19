@@ -301,21 +301,26 @@ class PlanResource:
             json.dump(ops, f, indent=2)
 
     # -- failover ---------------------------------------------------------
-    def failover(self, kind: str, *names, snapshot_ids=None, interval: int = 10, max_polls: int = 30):
+    def failover(self, kind: str, *names, snapshot_ids=None, with_monitor: bool = False,
+                 interval: int = 10, max_polls: int = 30):
         """kind: 'test' or 'prod'."""
         kind = kind.lower()
         if kind not in PLAN_TYPE_MAP:
             print(f"Error: failover kind must be 'test' or 'prod', got '{kind}'")
             return []
-        return self._run_action(ACTION_NAME_MAP[kind], names, snapshot_ids, interval, max_polls)
+        return self._run_action(ACTION_NAME_MAP[kind], names, snapshot_ids, interval, max_polls,
+                                 with_monitor=with_monitor)
 
-    def cleanup(self, *names, interval: int = 10, max_polls: int = 30):
-        return self._run_action("cleanup", names, None, interval, max_polls)
+    def cleanup(self, *names, with_monitor: bool = False, interval: int = 10, max_polls: int = 30):
+        return self._run_action("cleanup", names, None, interval, max_polls, with_monitor=with_monitor)
 
-    def failback(self, *names, site: str, snapshot_ids=None, interval: int = 10, max_polls: int = 30):
-        return self._run_action("failback", names, snapshot_ids, interval, max_polls, site=site)
+    def failback(self, *names, site: str, snapshot_ids=None, with_monitor: bool = False,
+                 interval: int = 10, max_polls: int = 30):
+        return self._run_action("failback", names, snapshot_ids, interval, max_polls, site=site,
+                                 with_monitor=with_monitor)
 
-    def _run_action(self, action, names, snapshot_ids, interval, max_polls, site=None):
+    def _run_action(self, action, names, snapshot_ids, interval, max_polls, site=None,
+                     with_monitor: bool = False):
         ers = self._ers
         matched, not_found = self._resolve(list(names))
         if not_found:
@@ -359,8 +364,9 @@ class PlanResource:
                                        params={"deployment_id": ers.deployment_id, "recovery_plan_id": plan_id},
                                        body={})
                 op_id, status, optype = self._extract(result)
-                status = poll_until_terminal(ers.api, ers.deployment_id, CLEANUP_PATH, op_id,
-                                              action, interval, max_polls, out=ers.output.out)
+                if with_monitor:
+                    status = poll_until_terminal(ers.api, ers.deployment_id, CLEANUP_PATH, op_id,
+                                                  action, interval, max_polls, out=ers.output.out)
 
             elif action == "failback":
                 if not site:
@@ -375,6 +381,12 @@ class PlanResource:
                     ers.output.out(f"  {plan_name}: SKIPPED — no groups found in plan.")
                     continue
 
+                # sync and cutover MUST be polled to completion regardless
+                # of with_monitor — each one is a structural prerequisite
+                # for triggering the next step, not just a status display.
+                # Only the final promotion step (below) can honor
+                # with_monitor, since nothing depends on knowing it
+                # finished before this call returns.
                 sync_result = ers.api.post(FB_SYNC_PATH,
                     params={"deployment_id": ers.deployment_id, "recovery_plan_id": plan_id},
                     body={"target_site_id": target_site_id, "snapshot_set_ids": snaps,
@@ -399,10 +411,11 @@ class PlanResource:
 
                 promote_result = ers.api.post(FB_PROMOTE_PATH,
                     params={"deployment_id": ers.deployment_id, "recovery_plan_id": plan_id}, body={})
-                op_id, _, optype = self._extract(promote_result)
+                op_id, status, optype = self._extract(promote_result)
                 optype = "FAILBACK"
-                status = poll_until_terminal(ers.api, ers.deployment_id, FB_PROMOTE_PATH, op_id,
-                                              "promotion", interval, max_polls, out=ers.output.out)
+                if with_monitor:
+                    status = poll_until_terminal(ers.api, ers.deployment_id, FB_PROMOTE_PATH, op_id,
+                                                  "promotion", interval, max_polls, out=ers.output.out)
                 results.append({"plan": plan_name, "status": status, "steps": {
                     "synchronization": {"op_id": sync_op_id, "status": sync_status},
                     "cutover":         {"op_id": cutover_op_id, "status": cutover_status},
@@ -431,9 +444,10 @@ class PlanResource:
                 self._save_ops(ops)
 
                 extra = {"failover_type": FAILOVER_QUERY_TYPE_MAP[action.split("_")[0]]}
-                status = poll_until_terminal(ers.api, ers.deployment_id, FAILOVER_PATH, op_id,
-                                              action, interval, max_polls, extra_params=extra,
-                                              out=ers.output.out)
+                if with_monitor:
+                    status = poll_until_terminal(ers.api, ers.deployment_id, FAILOVER_PATH, op_id,
+                                                  action, interval, max_polls, extra_params=extra,
+                                                  out=ers.output.out)
 
             plan_state[state_key] = {"last_action": action, "last_status": status, "op_id": op_id}
             results.append({"plan": plan_name, "op_id": op_id, "status": status, "type": optype})

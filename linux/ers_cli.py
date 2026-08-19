@@ -67,7 +67,8 @@ examples:
              --source-site site1 --target-site site2
   ers-cli --group enable --names group1,group2
   ers-cli --group disable --names "group1*"
-  ers-cli --group run --names group1,group2
+  ers-cli --group run --names group1,group2                     # kick off, return op-ids
+  ers-cli --group run --names group1,group2 --with-monitor       # kick off, poll to terminal state
   ers-cli --group delete --names group1,group2
   ers-cli --group delete --names "group1*"
 
@@ -84,10 +85,13 @@ examples:
   ers-cli --plan remove --names plan1 --with-groups group1,group2
   ers-cli --plan delete --names plan1,plan2
   ers-cli --plan delete --names "plan*"
-  ers-cli --plan failover --type test --names plan1,plan2   # auto picks latest snapshot per group
+  ers-cli --plan failover --type test --names plan1,plan2   # kick off, return op-id (auto picks latest snapshot per group)
+  ers-cli --plan failover --type test --names plan1,plan2 --with-monitor   # kick off + poll to terminal
   ers-cli --plan failover --type prod --names plan1
   ers-cli --plan cleanup --names plan1
   ers-cli --plan failback --names plan1 --site site1   # only runs if prod_failover SUCCEEDED
+             # (sync/cutover always poll internally -- required to sequence the steps --
+             # --with-monitor only affects whether the final promotion step is polled too)
 
   --managed -- orchestrated failover/failback across two registered sites
   ers-cli --managed failover --from site1 --to site2 \\
@@ -228,6 +232,11 @@ def main():
     parser.add_argument("--with-tags", action="store_true")
     parser.add_argument("--create-missing-tags", action="store_true")
     parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument("--with-monitor", action="store_true",
+                         help="Poll to a terminal state after kicking off — used with --group "
+                              "run and --plan failover/cleanup/failback. Without it, the "
+                              "command just kicks off and returns the op ID(s); monitor "
+                              "separately with --monitor group|plan.")
 
     args = parser.parse_args()
 
@@ -295,7 +304,7 @@ def main():
             if not names:
                 print("Error: --names is required with --group run")
                 sys.exit(1)
-            e.group.run(*names)
+            e.group.run(*names, with_monitor=args.with_monitor)
         else:
             print(f"Error: --group must be create|enable|disable|run|delete, got '{args.group}'")
             sys.exit(1)
@@ -390,16 +399,17 @@ def main():
                     print("Error: --type test|prod is required with --plan failover")
                     sys.exit(1)
                 snap_ids = csv_list(args.snapshot_ids) if args.snapshot_ids else None
-                e.plan.failover(args.type, *names, snapshot_ids=snap_ids,
+                e.plan.failover(args.type, *names, snapshot_ids=snap_ids, with_monitor=args.with_monitor,
                                  interval=args.interval, max_polls=args.max_polls)
             elif action == "cleanup":
-                e.plan.cleanup(*names, interval=args.interval, max_polls=args.max_polls)
+                e.plan.cleanup(*names, with_monitor=args.with_monitor,
+                                interval=args.interval, max_polls=args.max_polls)
             elif action == "failback":
                 if not args.site:
                     print("Error: --site is required with --plan failback")
                     sys.exit(1)
                 snap_ids = csv_list(args.snapshot_ids) if args.snapshot_ids else None
-                e.plan.failback(*names, site=args.site, snapshot_ids=snap_ids,
+                e.plan.failback(*names, site=args.site, snapshot_ids=snap_ids, with_monitor=args.with_monitor,
                                  interval=args.interval, max_polls=args.max_polls)
         else:
             print(f"Error: --plan must be create|add|remove|delete|failover|cleanup|failback, "

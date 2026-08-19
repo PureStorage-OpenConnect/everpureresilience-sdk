@@ -19,6 +19,7 @@ import json
 
 from .. import formatting
 from ..config import state_path
+from ..http import poll_until_terminal
 from .policy import POLICIES_PATH
 from .site import SITES_PATH
 
@@ -269,7 +270,7 @@ class GroupResource:
         return matched_names
 
     # -- run --------------------------------------------------------------
-    def run(self, *names):
+    def run(self, *names, with_monitor: bool = False):
         ers = self._ers
         matched, not_found = self._resolve(names)
         if not_found:
@@ -297,6 +298,13 @@ class GroupResource:
 
             with open(state_path(LAST_RUN_OPS), "w") as f:
                 json.dump(op_map, f, indent=2)
+
+        if with_monitor:
+            ers.output.out("")
+            for group_name, op_id in op_map.items():
+                status = poll_until_terminal(ers.api, ers.deployment_id, PROTECT_PATH, op_id,
+                                              f"group run: {group_name}", 10, 30, out=ers.output.out)
+                ers.output.out(f"  {group_name}: {status}")
 
         ers.output.out_json("group_run", op_map)
         return op_map

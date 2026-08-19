@@ -113,23 +113,68 @@ report rather than hand-authored:
 
 ## 4. Use it as a library
 
+Every namespace below (`e.policy`, `e.group`, `e.vm`, `e.plan`, `e.sites[...]`,
+`e.workflow`) has a matching `ers-cli` command in section 5 — the CLI is a
+thin wrapper over exactly these calls.
+
 ```python
 import ers
 
-e = ers.instance()                  # reads ~/.ers/config + credentials, auths automatically
+e = ers.instance()                    # reads ~/.ers/config + credentials, auths automatically
 e.register_site("prod-site")          # opens its own SmartConnect using credentials file
-e.register_site("drdc-site", si)        # or wrap an si you already connected yourself
+e.register_site("drdc-site", si)      # or wrap an si you already connected yourself
+
+# Policies, groups, plans — list/create/delete
+e.policy.list()
+e.policy.create(name="policy1", rpo_minutes=15, target_type="vmw",
+                 local_retention_hours=24, remote_retention_hours=72)
+e.policy.delete("policy1", "policy2")             # exact names
+e.policy.delete("policy*", with_wildcard=True)    # or a wildcard pattern
 
 e.group.list()
-e.plan.failover("prod", "PLAN-1")
+e.group.create(name="group1", with_policy="policy1",
+                source_site="prod-site", target_site="drdc-site")
+e.group.enable("group1", "group2")
+e.group.disable("group1", with_wildcard=True)
+e.group.run("group1", "group2")                   # kick off, return op-id(s)
+e.group.run("group1", "group2", with_monitor=True) # kick off, poll to a terminal state
+e.group.delete("group1", "group2")
 
-# Direct site actions
+e.plan.list()
+e.plan.create(name="plan1", with_groups=["group1", "group2"], target_site="drdc-site")
+e.plan.add("plan1", ["group1", "group2"])         # add groups to an existing plan
+e.plan.remove("plan1", ["group1"])                # remove groups from an existing plan
+e.plan.delete("plan1", "plan2")
+e.plan.failover("prod", "plan1")                          # kick off, return op-id
+e.plan.failover("prod", "plan1", with_monitor=True)       # kick off + poll to terminal
+e.plan.cleanup("plan1")
+# site doubles as the Pure1 site name for failback — register your sites
+# using the same name the site is registered under in Pure1.
+e.plan.failback("plan1", site="prod-site")   # only runs if prod_failover SUCCEEDED
+
+# VM enrollment in a group
+e.vm.list(with_site="prod-site")
+e.vm.add("vm1", "vm2", with_group="group1")                        # default protection_workflow=FA_OFFLOAD
+e.vm.add("vm1", "vm2", with_group="group1", with_type="VADP")
+e.vm.remove("vm1", "vm2", with_group="group1")
+
+# Direct site actions — power, network, tags
 e.sites["prod-site"].power_off(file="vm-list.json")
 e.sites["prod-site"].power_on(file="vm-list.json")
 e.sites["drdc-site"].connect_networks(file="vm-list.json")
 e.sites["prod-site"].export_tags(file="vm-list.json")
 e.sites["drdc-site"].apply_tags(file="vm-list.json", source="prod-site", create_missing=True)
+e.sites["prod-site"].list_networks()   # diagnose a "network not found" error
+e.sites["prod-site"].list_folders()    # diagnose a "folder not found" error
 
+# VM lifecycle — clone from template / delete
+e.sites["prod-site"].create_vm(name="vm1", template="golden-template", datastore="datastore1")
+e.sites["prod-site"].create_vms(name_prefix="ubuntu-tst-", count=10,
+                                 template="golden-template", datastore="datastore1")
+e.sites["prod-site"].delete_vm("vm1")
+e.sites["prod-site"].delete_vms(name_prefix="ubuntu-tst-", count=10)
+
+# Managed workflows
 e.workflow.managed_failover(
     vms_file="vm-list.json", group_names=["G1"], plan_names=["P1"],
     from_site="prod-site", to_site="drdc-site",
@@ -147,22 +192,96 @@ e.workflow.managed_failback(
 
 ## 5. Or use the CLI
 
+Every command below has a direct Python equivalent — `ers-cli --help` shows
+the full, current list. `--name` (singular) is used only for `create`
+actions, which always create exactly one resource; `--names` (comma-
+separated, or a single `*`-wildcard pattern — no separate flag needed, a
+literal `*` anywhere in `--names` is auto-detected) is used everywhere else.
+
+### List
+
 ```bash
-ers-cli --list groups
-ers-cli --group run --names G1,G2
-ers-cli --plan failover --type prod --names P1,P2
-ers-cli --plan failback --names P1 --site DC.DEV
-ers-cli --managed-failover --from prod-site --to drdc-site \
+ers-cli --list policies|groups|plans|sites|snapshots --names ... --details --limit 50
+ers-cli --list vms --with-site prod-site
+```
+
+### Service level policies
+
+```bash
+ers-cli --policy create --name policy1 --rpo 15 --target-type vmw \
+           --local-retention 24 --remote-retention 72
+ers-cli --policy delete --names policy1,policy2
+ers-cli --policy delete --names "policy*"
+```
+
+### Application groups
+
+```bash
+ers-cli --group create --name group1 --with-policy policy1 \
+           --source-site prod-site --target-site drdc-site
+ers-cli --group enable --names group1,group2
+ers-cli --group disable --names "group1*"
+ers-cli --group run --names group1,group2                # kick off, return op-id(s)
+ers-cli --group run --names group1,group2 --with-monitor  # kick off, poll to a terminal state
+ers-cli --group delete --names group1,group2
+ers-cli --group delete --names "group1*"
+```
+
+### VM enrollment in a group
+
+```bash
+ers-cli --vm add --names vm1,vm2 --with-group group1
+ers-cli --vm add --names vm1,vm2 --with-group group1 --with-type VADP   # default: FA_OFFLOAD
+ers-cli --vm add --names "vm*" --with-group group1
+ers-cli --vm remove --names vm1,vm2 --with-group group1
+ers-cli --vm remove --names "vm*" --with-group group1
+```
+
+### Recovery plans
+
+```bash
+ers-cli --plan create --name plan1 --with-groups group1,group2 --target-site drdc-site
+ers-cli --plan add --names plan1 --with-groups group1,group2
+ers-cli --plan remove --names plan1 --with-groups group1,group2
+ers-cli --plan delete --names plan1,plan2
+ers-cli --plan delete --names "plan*"
+
+ers-cli --plan failover --type test --names plan1,plan2   # auto picks latest snapshot per group
+ers-cli --plan failover --type prod --names plan1
+ers-cli --plan cleanup --names plan1
+ers-cli --plan failback --names plan1 --site prod-site    # only runs if prod_failover SUCCEEDED
+```
+
+By default, `--group run` and `--plan failover/cleanup/failback` just kick
+off the operation and return its op ID — add `--with-monitor` to also poll
+to a terminal state in the same call, instead of a separate `--monitor`
+step:
+```bash
+ers-cli --plan failover --type prod --names plan1 --with-monitor
+```
+`failback` is the one exception worth knowing about: its synchronization
+and cutover steps always poll to completion internally regardless of
+`--with-monitor`, since each is a hard prerequisite for triggering the
+next — the flag only controls whether the final promotion step is also
+polled, or just kicked off like everything else.
+
+### Managed workflows — orchestrated failover/failback across two sites
+
+```bash
+ers-cli --managed failover --from prod-site --to drdc-site \
            --vms-file vm-list.json --group-names G1,G2 --plan-names P1,P2 \
            --with-tags --create-missing-tags --dry-run
 
 # --to is also the Pure1 site name used for the failback API call — register
 # sites using the same name the site is registered under in Pure1.
-ers-cli --managed-failback --from drdc-site --to prod-site \
+ers-cli --managed failback --from drdc-site --to prod-site \
            --vms-file vm-list.json --group-names G1,G2 --plan-names P1,P2 \
            --with-network --with-tags --create-missing-tags
+```
 
-# Direct site actions — power, network, and tags, without a full managed workflow
+### Direct site actions — power, network, tags, VM lifecycle, without a full managed workflow
+
+```bash
 ers-cli --site prod-site --power off --vms-file vm-list.json
 ers-cli --site prod-site --power off --names vm-1,vm-2
 ers-cli --site prod-site --power on  --vms-file vm-list.json
@@ -170,6 +289,35 @@ ers-cli --site drdc-site --connect-networks --vms-file vm-list.json
 ers-cli --site prod-site --export-tags --vms-file vm-list.json
 ers-cli --site drdc-site --apply-tags --source prod-site \
            --vms-file vm-list.json --create-missing-tags
+
+# Diagnose "network not found"/"folder not found" errors — see exactly
+# what your connecting account can actually see in vCenter
+ers-cli --site prod-site --list-networks
+ers-cli --site prod-site --list-folders
+
+# Clone a single VM from a template
+ers-cli --site prod-site --create-vm --name vm1 --template golden-template \
+           --resource-pool Resources --datastore datastore1 --network "VM Network"
+
+# Clone N VMs from a template (auto-numbered, e.g. ubuntu-tst-001, ubuntu-tst-002, ...)
+ers-cli --site prod-site --create-vm --name-prefix ubuntu-tst- --count 10 \
+           --template golden-template --datastore datastore1
+# --resource-pool defaults to 'Resources' (vCenter's standard default root
+# resource pool) if omitted; --network/--folder are optional too, inheriting
+# the template's own network/folder if not given; --power-on to start it
+# immediately (default: stays off).
+
+# Delete a VM — powers off first if running, then destroys it
+ers-cli --site prod-site --delete-vm --name vm1
+# Delete N VMs by the same --name-prefix/--count naming as --create-vm
+ers-cli --site prod-site --delete-vm --name-prefix ubuntu-tst- --count 10
+```
+
+### Everything else
+
+```bash
+ers-cli --monitor group|plan --names group1,plan1
+ers-cli --profile staging --list groups
 ```
 
 ## 6. System tests
