@@ -10,9 +10,10 @@ dependencies = ["PyJWT", "cryptography", "requests", "pyVmomi"]
 [project.scripts]
 ers-cli = "ers_cli:main"
 ers-system-test = "ers_system_test:main"
+ers-scale-test = "ers_scale_test:main"
 
 [tool.setuptools]
-py-modules = ["ers_cli", "ers_system_test"]
+py-modules = ["ers_cli", "ers_system_test", "ers_scale_test"]
 
 [tool.setuptools.packages.find]
 include = ["ers", "ers.*", "system_tests", "system_tests.*"]

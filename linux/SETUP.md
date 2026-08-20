@@ -394,3 +394,67 @@ site name to confirm before running, unless `--yes` is passed. Tests marked
 `--no-dry-run`) require a second, separate confirmation. Exit code is `0`
 only if every selected test PASSed; `SKIP`ped tests don't count against it.
 
+## 7. Scale testing
+
+`ers-scale-test` creates M VMs distributed evenly across N datastores,
+distributes those VMs evenly across X application groups, distributes
+those X groups evenly across Y recovery plans, then runs protection on
+every group and test failover on every plan.
+
+```bash
+cp scale-test-config.json scale-test-config.json.local   # or edit in place
+```
+
+Edit `scale-test-config.json`:
+```json
+{
+  "schema_version": 1,
+  "profile": "default",
+  "source_site": "prod-site",
+  "target_site": "drdc-site",
+  "service_level_policy": "YOUR-POLICY-NAME",
+  "group_name_prefix": "ers-scale-grp-",
+  "plan_name_prefix": "ers-scale-plan-",
+  "vm_name_prefix": "ers-scale-vm-",
+  "datastore_name_prefix": "ers-scale-ds-",
+  "vm_lnx_template": "YOUR-LINUX-TEMPLATE-NAME",
+  "vm_win_template": "YOUR-WINDOWS-TEMPLATE-NAME"
+}
+```
+
+**Datastores are not created** — `datastore_name_prefix` + N must already
+exist on `source_site` (e.g. `datastore_name_prefix="ers-scale-ds-"` and
+`--datastores 10` expects `ers-scale-ds-001` through `ers-scale-ds-010` to
+already be there). If you want to target specific existing datastores by
+name instead, set `datastore_names` in the config to a list of them —
+when set, it takes precedence over `datastore_name_prefix` entirely, and
+`--datastores` is no longer required on the command line (its count is
+taken from `datastore_names`' length instead). If only one of
+`vm_lnx_template`/`vm_win_template` is given, every VM uses it; if both
+are given, the first half of the VMs (by index) use the Linux template
+and the second half use the Windows template.
+
+VM/group/plan names are `{prefix}{NNN}` (3-digit, zero-padded), and
+distribution is round-robin across the target buckets — even when the
+counts don't divide evenly, no bucket differs from another by more than 1.
+
+```bash
+# Preview the plan (names, distribution) without creating anything
+ers-scale-test --vms 100 --datastores 10 --groups 4 --plans 2 --dry-run
+
+# Run it for real
+ers-scale-test --vms 100 --datastores 10 --groups 4 --plans 2
+# -> 100 VMs, 10 per datastore, 25 per group, 2 groups per plan
+
+ers-scale-test --vms 100 --datastores 5 --groups 10 --plans 1
+# -> 100 VMs, 20 per datastore, 10 per group, all 10 groups in the 1 plan
+
+# Tear everything the last run created back down
+ers-scale-test --cleanup
+```
+
+`--cleanup` reads `~/.ers/state/.last_scale_test.json` — written right
+after resource creation, before groups are run or plans are failed over —
+so it can tear down what was created even if a later step (a group run or
+test failover) fails partway through.
+

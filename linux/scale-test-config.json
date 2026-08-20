@@ -1,0 +1,14 @@
+{
+  "schema_version": 1,
+  "profile": "default",
+  "source_site": "prod-site",
+  "target_site": "drdc-site",
+  "service_level_policy": "YOUR-POLICY-NAME",
+  "group_name_prefix": "ers-grp-",
+  "plan_name_prefix": "ers-plan-",
+  "vm_name_prefix": "ers-vm-",
+  "datastore_name_prefix": "ers-ds-",
+  "datastore_names": null,
+  "vm_lnx_template": "YOUR-LINUX-TEMPLATE-NAME",
+  "vm_win_template": "YOUR-WINDOWS-TEMPLATE-NAME"
+}
