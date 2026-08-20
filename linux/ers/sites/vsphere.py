@@ -26,7 +26,7 @@ A site is usable two ways:
      (SessionManager.AcquireCloneTicket()) instead of basic auth.
 
 Tag state is transparent to the caller: export_tags()/apply_tags() read
-and write ~/.ers/state/.last_tags_export.json automatically — no file
+and write ~/.ers/state/last_tags_export.json automatically — no file
 path is ever passed in or out. Like the other .last_*.json state files,
 only one export is "in flight" at a time; the site it was captured from
 is recorded inside the file (not in the filename), and apply_tags()
@@ -865,10 +865,10 @@ class VSphereSite(Site):
     # Tags (was vm-tag-mgr.py) — state file is transparent
     # ------------------------------------------------------------------
 
-    #: single shared file, like the other .last_*.json state files — only
+    #: single shared file, like the other last_*.json state files — only
     #: one export is "in flight" at a time; the site it came from is
     #: recorded inside the file itself rather than in the filename.
-    TAG_EXPORT_FILE = ".last_tags_export.json"
+    TAG_EXPORT_FILE = "last_tags_export.json"
 
     @staticmethod
     def _tag_state_path() -> str:
@@ -933,7 +933,7 @@ class VSphereSite(Site):
     def apply_tags(self, *vm_names, file: str = None, source: str = None, create_missing: bool = False):
         """Apply tags captured by another registered site's export_tags().
         `source` is that site's name — checked against the site name
-        recorded inside .last_tags_export.json, no file path needed."""
+        recorded inside last_tags_export.json, no file path needed."""
         if not source:
             print("Error: apply_tags() requires source=<site-name> "
                   "(the site that ran export_tags())")

@@ -402,7 +402,7 @@ groups across Y recovery plans, then runs protection on every group and
 test failover on every plan.
 
 **`--vms`/`--datastores`/`--groups`/`--plans` are desired TOTALS, not
-deltas.** A persistent manifest (`~/.ers/state/.scale_test_manifest.json`)
+deltas.** A persistent manifest (`~/.ers/state/scale_test_manifest.json`)
 tracks everything created so far, so re-running with higher numbers is
 additive — it only creates the difference, and never moves or recreates
 anything that already exists. New items always go to whichever existing

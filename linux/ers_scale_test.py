@@ -24,7 +24,7 @@ failover on every plan.
 
 --vms/--datastores/--groups/--plans are DESIRED TOTALS, not deltas — the
 tool tracks what already exists in a persistent manifest
-(~/.ers/state/.scale_test_manifest.json) and only creates the difference.
+(~/.ers/state/scale_test_manifest.json) and only creates the difference.
 Existing placements never move: new VMs/groups/plan-memberships always go
 to whichever existing bucket currently has the fewest, so scaling up
 tops off under-filled buckets and fills new ones first, rather than
@@ -56,11 +56,12 @@ import json
 import sys
 import time
 from collections import Counter
+from datetime import datetime, timezone
 
 import ers
 from ers.config import state_path
 
-MANIFEST_FILE = ".scale_test_manifest.json"
+MANIFEST_FILE = "scale_test_manifest.json"
 DEFAULT_CONFIG_PATH = "scale-test-config.json"
 
 
@@ -123,15 +124,18 @@ def empty_manifest() -> dict:
         "vms": {},      # name -> {"datastore": ..., "template": ..., "group": name or None}
         "groups": {},   # name -> {"plan": name or None}
         "plans": [],    # list of plan names that exist
+        "run_history": [],  # one entry per real (non-dry-run) run — see run_scale_test()
     }
 
 
 def load_manifest() -> dict:
     try:
         with open(state_path(MANIFEST_FILE)) as f:
-            return json.load(f)
+            manifest = json.load(f)
     except FileNotFoundError:
         return empty_manifest()
+    manifest.setdefault("run_history", [])  # forward-compat with older manifests
+    return manifest
 
 
 def save_manifest(manifest: dict):
@@ -457,19 +461,46 @@ def run_scale_test(cfg: dict, m: int, n, x: int, y: int, dry_run: bool):
 
     save_manifest(manifest)
 
+    run_protection_and_failover(e, manifest)
+    e.flush()
+
+
+def run_protection_and_failover(e, manifest: dict):
+    """Runs protection on every currently-tracked group and test failover
+    on every currently-tracked plan, timing each and appending a fresh
+    entry to the manifest's run_history — shared by the tail of a normal
+    run and by --rerun, so both record identical, non-divergent history
+    entries."""
     all_groups = list(manifest["groups"].keys())
     all_plans = list(manifest["plans"])
 
-    # 6. Run protection on every group — waits for completion, since test
-    #    failover needs a completed snapshot to work from.
+    # Run protection on every group — waits for completion, since test
+    # failover needs a completed snapshot to work from.
     print(f"\n-> Running protection for {len(all_groups)} group(s)...")
+    protection_time_minutes = None
     if all_groups:
+        protection_start = time.time()
         e.group.run(*all_groups, with_monitor=True)
+        protection_time_minutes = round((time.time() - protection_start) / 60, 2)
+        print(f"   Protection completed in {protection_time_minutes}min.")
 
-    # 7. Test failover on every plan
+    # Test failover on every plan
     print(f"\n-> Running test failover for {len(all_plans)} plan(s)...")
+    recovery_time_minutes = None
     if all_plans:
+        recovery_start = time.time()
         e.plan.failover("test", *all_plans, with_monitor=True)
+        recovery_time_minutes = round((time.time() - recovery_start) / 60, 2)
+        print(f"   Test failover completed in {recovery_time_minutes}min.")
+
+    manifest["run_history"].append({
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "total_vms": len(manifest["vms"]), "total_groups": len(manifest["groups"]),
+        "total_plans": len(manifest["plans"]),
+        "protection_time_minutes": protection_time_minutes,
+        "recovery_time_minutes": recovery_time_minutes,
+    })
+    save_manifest(manifest)
 
     counts = final_counts(manifest, {"new_vm_datastore": {}, "vm_group_assignment": {},
                                       "group_plan_assignment": {}})
@@ -480,7 +511,33 @@ def run_scale_test(cfg: dict, m: int, n, x: int, y: int, dry_run: bool):
     print(f"  VMs per datastore: {dict(counts['ds_counts'])}")
     print(f"  VMs per group:     {dict(counts['group_counts'])}")
     print(f"  Groups per plan:   {dict(counts['plan_counts'])}")
+    print(f"  Protection time:   {protection_time_minutes}min")
+    print(f"  Recovery time:     {recovery_time_minutes}min")
     print(f"\n  Run 'ers-scale-test --cleanup' to tear all of this down.")
+
+
+def run_rerun(cfg: dict):
+    """Re-executes protection + test failover against everything
+    currently tracked in the manifest, with no --vms/--datastores/
+    --groups/--plans needed — for repeating the exact same scale test
+    (e.g. a second timing measurement) without creating or changing
+    anything."""
+    manifest = load_manifest()
+    if not manifest["vms"]:
+        print(f"No scale-test manifest found ({state_path(MANIFEST_FILE)}) — nothing to re-run. "
+              f"Run a normal scale test first.")
+        return
+
+    print(f"\n{'=' * 70}\n  ERS SCALE TEST — RERUN\n{'=' * 70}")
+    print(f"  Re-running against everything already tracked: "
+          f"{len(manifest['vms'])} VM(s), {len(manifest['groups'])} group(s), "
+          f"{len(manifest['plans'])} plan(s). No resources will be created or moved.")
+
+    e = ers.instance(profile=manifest.get("profile", cfg["profile"]))
+    e.register_site(manifest["source_site"])
+    e.register_site(manifest["target_site"])
+
+    run_protection_and_failover(e, manifest)
     e.flush()
 
 
@@ -488,7 +545,7 @@ def run_scale_test(cfg: dict, m: int, n, x: int, y: int, dry_run: bool):
 # Cleanup
 # ---------------------------------------------------------------------------
 
-def run_cleanup(cfg: dict, keep_vms: bool, keep_groups: bool):
+def run_cleanup(cfg: dict, keep_vms: bool, keep_groups: bool, keep_plans: bool):
     manifest = load_manifest()
     if not manifest["vms"] and not manifest["groups"] and not manifest["plans"]:
         print(f"No scale-test manifest found ({state_path(MANIFEST_FILE)}) — nothing to clean up.")
@@ -501,9 +558,14 @@ def run_cleanup(cfg: dict, keep_vms: bool, keep_groups: bool):
     group_names = list(manifest["groups"].keys())
     vm_names = list(manifest["vms"].keys())
 
-    mode = "full teardown" if not (keep_vms or keep_groups) else \
-           ("keep groups (detach from plans, delete plans only)" if keep_groups else
-            "keep VMs (delete groups/plans, leave VMs in vCenter)")
+    if keep_plans:
+        mode = "keep everything (plan cleanup only — reverts test failover, nothing deleted)"
+    elif keep_groups:
+        mode = "keep groups (detach from plans, delete plans only)"
+    elif keep_vms:
+        mode = "keep VMs (delete groups/plans, leave VMs in vCenter)"
+    else:
+        mode = "full teardown"
     print(f"\nCleanup mode: {mode}")
     print(f"Tracked: {len(plan_names)} plan(s), {len(group_names)} group(s), {len(vm_names)} VM(s)")
 
@@ -518,6 +580,14 @@ def run_cleanup(cfg: dict, keep_vms: bool, keep_groups: bool):
                   f"orphaned test-failover resources behind in vCenter.")
         else:
             print(f"   Plan cleanup succeeded for all {len(plan_names)} plan(s).")
+
+    if keep_plans:
+        # Nothing else to do — plans/groups/VMs are all left exactly as
+        # they are, ready for --rerun or a further scale-up.
+        print("\nCleanup complete — nothing deleted; plan cleanup reverted test failover state "
+              "so a --rerun or further scale-up can proceed cleanly.")
+        e.flush()
+        return
 
     if keep_groups:
         # Detach every group from its plan before deleting the plan --
@@ -600,25 +670,48 @@ def main():
                          help="Preview the delta (names, final distribution) without creating anything")
     parser.add_argument("--cleanup", action="store_true",
                          help="Tear down everything tracked in the scale-test manifest")
+    parser.add_argument("--rerun", action="store_true",
+                         help="Re-run protection + test failover against everything already "
+                              "tracked, with no --vms/--datastores/--groups/--plans needed — "
+                              "creates or moves nothing, just repeats the exercise (e.g. for "
+                              "another timing measurement)")
     parser.add_argument("--keep-vms", action="store_true",
                          help="With --cleanup: delete groups/plans, leave VMs in vCenter (unenrolled)")
     parser.add_argument("--keep-groups", action="store_true",
                          help="With --cleanup: detach groups from plans and delete plans only; "
                               "groups and their VMs are left exactly as they are")
+    parser.add_argument("--keep-plans", action="store_true",
+                         help="With --cleanup: deletes nothing — just runs plan cleanup "
+                              "(reverts test failover) so a --rerun or further scale-up can "
+                              "proceed. Plans, groups, and VMs are all left exactly as they are.")
     args = parser.parse_args()
 
     cfg = load_config(args.config)
 
-    if args.cleanup:
-        if args.keep_vms and args.keep_groups:
-            print("Error: --keep-vms and --keep-groups can't both be given — "
-                  "--keep-groups already implies keeping the VMs too.")
+    if args.rerun:
+        if args.cleanup or args.keep_vms or args.keep_groups or args.keep_plans:
+            print("Error: --rerun can't be combined with --cleanup/--keep-vms/"
+                  "--keep-groups/--keep-plans")
             sys.exit(1)
-        run_cleanup(cfg, keep_vms=args.keep_vms, keep_groups=args.keep_groups)
+        if args.vms or args.datastores or args.groups or args.plans:
+            print("Note: --vms/--datastores/--groups/--plans are ignored with --rerun — "
+                  "it always targets everything already tracked.")
+        run_rerun(cfg)
         return
 
-    if args.keep_vms or args.keep_groups:
-        print("Error: --keep-vms/--keep-groups only apply with --cleanup")
+    if args.cleanup:
+        keep_flags_given = sum([args.keep_vms, args.keep_groups, args.keep_plans])
+        if keep_flags_given > 1:
+            print("Error: --keep-vms/--keep-groups/--keep-plans are mutually exclusive — "
+                  "--keep-plans already implies keeping groups and VMs too, and --keep-groups "
+                  "already implies keeping VMs too.")
+            sys.exit(1)
+        run_cleanup(cfg, keep_vms=args.keep_vms, keep_groups=args.keep_groups,
+                    keep_plans=args.keep_plans)
+        return
+
+    if args.keep_vms or args.keep_groups or args.keep_plans:
+        print("Error: --keep-vms/--keep-groups/--keep-plans only apply with --cleanup")
         sys.exit(1)
 
     has_datastore_names = bool(cfg.get("datastore_names"))
