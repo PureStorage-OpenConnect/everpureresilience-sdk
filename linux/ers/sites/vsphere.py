@@ -224,6 +224,14 @@ class VSphereSite(Site):
                     found[prop.val] = obj.obj
         return found
 
+    def vms_exist(self, names: list) -> set:
+        """Returns the subset of `names` that already exist as VMs in
+        this site's inventory — one batched PropertyCollector lookup
+        (same as _get_vms_by_names), not one round trip per name. Useful
+        for idempotent VM creation: skip cloning a VM that's already
+        there instead of erroring on a duplicate name."""
+        return set(self._get_vms_by_names(names).keys())
+
     #: bump if the vm-list JSON schema ever changes shape
     SUPPORTED_SCHEMA_VERSIONS = (2,)
 

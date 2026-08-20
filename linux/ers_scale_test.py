@@ -22,25 +22,33 @@ VMs evenly across X application groups, distributes those X groups evenly
 across Y recovery plans, then runs protection on every group and test
 failover on every plan.
 
-Configurable defaults live in scale-test-config.json (source_site,
-target_site, service_level_policy, name prefixes, VM templates) — M/N/X/Y
-are passed on the command line each run, since those are what actually
-change from one scale test to the next.
+--vms/--datastores/--groups/--plans are DESIRED TOTALS, not deltas — the
+tool tracks what already exists in a persistent manifest
+(~/.ers/state/.scale_test_manifest.json) and only creates the difference.
+Existing placements never move: new VMs/groups/plan-memberships always go
+to whichever existing bucket currently has the fewest, so scaling up
+tops off under-filled buckets and fills new ones first, rather than
+reshuffling anything already in place. On a fresh run (nothing in the
+manifest yet) this produces the same even distribution as plain
+round-robin.
 
-Datastores are NOT created — either datastore_name_prefix + N must already
-exist on source_site (e.g. datastore_name_prefix="ers-scale-ds-" and N=10
-means ers-scale-ds-001 through ers-scale-ds-010 must already exist), or
-the config's datastore_names can list specific existing datastores by
-name directly — if set, it takes precedence over datastore_name_prefix
-entirely, and --datastores is no longer required on the command line
-(its count is taken from datastore_names' length instead).
+Configurable defaults live in scale-test-config.json (source_site,
+target_site, service_level_policy, name prefixes, VM templates).
+
+Datastores are NOT created — either datastore_name_prefix + N must
+already exist on source_site, or the config's datastore_names can list
+specific existing datastores by name directly (takes precedence over
+datastore_name_prefix; --datastores becomes optional, taken from its
+length instead). Either way, added datastore names are unioned into the
+manifest across runs — none are ever removed automatically.
 
 examples:
-  ers-scale-test --vms 100 --datastores 10 --groups 4 --plans 2
-  ers-scale-test --vms 100 --datastores 5  --groups 10 --plans 1
-  ers-scale-test --vms 100 --datastores 10 --groups 4 --plans 2 --dry-run
-  ers-scale-test --vms 100 --groups 4 --plans 2   # datastore_names configured, --datastores omitted
+  ers-scale-test --vms 4 --datastores 1 --groups 2 --plans 1
+  ers-scale-test --vms 20 --datastores 4 --groups 4 --plans 2 --dry-run
+  ers-scale-test --vms 20 --datastores 4 --groups 4 --plans 2
   ers-scale-test --cleanup
+  ers-scale-test --cleanup --keep-vms      # tear down groups/plans, leave VMs in vCenter
+  ers-scale-test --cleanup --keep-groups   # detach groups from plans, delete plans only
 """
 
 import argparse
@@ -52,9 +60,13 @@ from collections import Counter
 import ers
 from ers.config import state_path
 
-STATE_FILE = ".last_scale_test.json"
+MANIFEST_FILE = ".scale_test_manifest.json"
 DEFAULT_CONFIG_PATH = "scale-test-config.json"
 
+
+# ---------------------------------------------------------------------------
+# Config
+# ---------------------------------------------------------------------------
 
 def load_config(path: str) -> dict:
     try:
@@ -96,199 +108,440 @@ def load_config(path: str) -> dict:
     return cfg
 
 
-def round_robin(count: int, buckets: int) -> list:
-    """Returns a list of `count` 0-based bucket indices, assigning items to
-    buckets round-robin — as even a split as possible, gracefully handling
-    counts that don't divide evenly (off by at most 1 per bucket)."""
-    return [i % buckets for i in range(count)]
+# ---------------------------------------------------------------------------
+# Manifest — the persistent record of everything created so far. Single
+# source of truth: VM->group and group->plan are recorded on the VM/group
+# itself (None = not yet assigned), so "how many does bucket X have" and
+# "what's unassigned" are both simple filters over one dict, with no
+# separate lists to keep in sync.
+# ---------------------------------------------------------------------------
 
-
-def save_state(state: dict):
-    with open(state_path(STATE_FILE), "w") as f:
-        json.dump(state, f, indent=2)
-
-
-def load_state():
-    try:
-        with open(state_path(STATE_FILE)) as f:
-            return json.load(f)
-    except FileNotFoundError:
-        return None
-
-
-def build_plan(cfg: dict, m: int, n: int, x: int, y: int) -> dict:
-    """Computes every name and distribution up front — used by both the
-    real run and --dry-run, so the preview is guaranteed to match what a
-    real run would actually do."""
-    if cfg.get("datastore_names"):
-        ds_names = list(cfg["datastore_names"])
-    else:
-        ds_names = [f"{cfg['datastore_name_prefix']}{i:03d}" for i in range(1, n + 1)]
-    vm_names = [f"{cfg['vm_name_prefix']}{i:03d}" for i in range(1, m + 1)]
-    group_names = [f"{cfg['group_name_prefix']}{i:03d}" for i in range(1, x + 1)]
-    plan_names = [f"{cfg['plan_name_prefix']}{i:03d}" for i in range(1, y + 1)]
-
-    vm_ds_idx = round_robin(m, len(ds_names))
-    vm_group_idx = round_robin(m, x)
-    group_plan_idx = round_robin(x, y)
-
-    lnx, win = cfg["vm_lnx_template"], cfg["vm_win_template"]
-    if lnx and win:
-        half = (m + 1) // 2  # first half (rounded up) gets lnx
-        vm_template = [lnx] * half + [win] * (m - half)
-    else:
-        vm_template = [lnx or win] * m
-
-    group_vms = {g: [] for g in group_names}
-    for i, name in enumerate(vm_names):
-        group_vms[group_names[vm_group_idx[i]]].append(name)
-
-    plan_groups = {p: [] for p in plan_names}
-    for j, name in enumerate(group_names):
-        plan_groups[plan_names[group_plan_idx[j]]].append(name)
-
+def empty_manifest() -> dict:
     return {
-        "ds_names": ds_names, "vm_names": vm_names,
-        "group_names": group_names, "plan_names": plan_names,
-        "vm_datastore": {vm_names[i]: ds_names[vm_ds_idx[i]] for i in range(m)},
-        "vm_template": {vm_names[i]: vm_template[i] for i in range(m)},
-        "group_vms": group_vms, "plan_groups": plan_groups,
+        "source_site": None, "target_site": None, "profile": "default",
+        "datastore_names": [],
+        "vms": {},      # name -> {"datastore": ..., "template": ..., "group": name or None}
+        "groups": {},   # name -> {"plan": name or None}
+        "plans": [],    # list of plan names that exist
     }
 
 
-def print_dry_run(cfg: dict, plan: dict, m: int, n: int, x: int, y: int):
-    print(f"\n  VMs to create: {m}, using templates: "
-          f"{Counter(plan['vm_template'].values())}")
-    print(f"  VM -> datastore distribution: "
-          f"{dict(Counter(plan['vm_datastore'].values()))}")
-    print(f"  VM -> group distribution: "
-          f"{ {g: len(v) for g, v in plan['group_vms'].items()} }")
-    print(f"  Group -> plan distribution: "
-          f"{ {p: len(g) for p, g in plan['plan_groups'].items()} }")
-    print(f"\n  Datastores expected to already exist on {cfg['source_site']}: "
-          f"{', '.join(plan['ds_names'])}")
-    print(f"  Groups to create: {', '.join(plan['group_names'])}")
-    print(f"  Plans to create: {', '.join(plan['plan_names'])}")
+def load_manifest() -> dict:
+    try:
+        with open(state_path(MANIFEST_FILE)) as f:
+            return json.load(f)
+    except FileNotFoundError:
+        return empty_manifest()
 
 
-def run_scale_test(cfg: dict, m: int, n: int, x: int, y: int, dry_run: bool):
+def save_manifest(manifest: dict):
+    with open(state_path(MANIFEST_FILE), "w") as f:
+        json.dump(manifest, f, indent=2)
+
+
+def delete_manifest():
+    import os
+    try:
+        os.remove(state_path(MANIFEST_FILE))
+    except FileNotFoundError:
+        pass
+
+
+# ---------------------------------------------------------------------------
+# Distribution
+# ---------------------------------------------------------------------------
+
+def least_loaded_assign(new_items: list, buckets: list, current_loads: dict) -> dict:
+    """Assigns each of `new_items` to whichever bucket in `buckets`
+    currently has the fewest items, incrementing as it goes. Existing
+    loads are never disturbed — only where NEW items land is decided
+    here. Ties broken by bucket name for determinism. On a fresh set
+    (all loads 0) this is equivalent to round-robin."""
+    loads = {b: current_loads.get(b, 0) for b in buckets}
+    assignment = {}
+    for item in new_items:
+        chosen = min(buckets, key=lambda b: (loads[b], b))
+        assignment[item] = chosen
+        loads[chosen] += 1
+    return assignment
+
+
+def resolve_datastore_names(cfg: dict, manifest: dict, target_n) -> list:
+    """Full desired datastore list, unioned with whatever's already in
+    the manifest (existing entries are never dropped, since they may
+    already hold VMs)."""
+    existing = manifest.get("datastore_names", [])
+    if cfg.get("datastore_names"):
+        desired = list(cfg["datastore_names"])
+    else:
+        desired = [f"{cfg['datastore_name_prefix']}{i:03d}" for i in range(1, (target_n or 0) + 1)]
+    result = list(existing)
+    for d in desired:
+        if d not in result:
+            result.append(d)
+    return result
+
+
+def next_index(existing_names, prefix: str) -> int:
+    """Highest existing NNN suffix for this prefix, + 1 — so new names
+    continue the sequence instead of colliding with what's already there."""
+    max_i = 0
+    for name in existing_names:
+        if name.startswith(prefix):
+            suffix = name[len(prefix):]
+            if suffix.isdigit():
+                max_i = max(max_i, int(suffix))
+    return max_i + 1
+
+
+# ---------------------------------------------------------------------------
+# Plan computation — shared by --dry-run and the real run, so the preview
+# is guaranteed to match what a real run would actually do.
+# ---------------------------------------------------------------------------
+
+def compute_delta(cfg: dict, manifest: dict, m: int, x: int, y: int, n) -> dict:
+    ds_names = resolve_datastore_names(cfg, manifest, n)
+
+    current_vms = manifest["vms"]
+    current_groups = manifest["groups"]
+    current_plans = manifest["plans"]
+
+    current_m, current_x, current_y = len(current_vms), len(current_groups), len(current_plans)
+
+    if m < current_m:
+        print(f"Error: --vms {m} is less than the {current_m} VM(s) already tracked — "
+              f"this tool only scales up, it doesn't remove resources.")
+        sys.exit(1)
+    if x < current_x:
+        print(f"Error: --groups {x} is less than the {current_x} group(s) already tracked.")
+        sys.exit(1)
+    if y < current_y:
+        print(f"Error: --plans {y} is less than the {current_y} plan(s) already tracked.")
+        sys.exit(1)
+
+    new_vm_count = m - current_m
+    new_group_count = x - current_x
+    new_plan_count = y - current_y
+
+    vm_start = next_index(current_vms, cfg["vm_name_prefix"])
+    new_vm_names = [f"{cfg['vm_name_prefix']}{i:03d}" for i in range(vm_start, vm_start + new_vm_count)]
+
+    grp_start = next_index(list(current_groups), cfg["group_name_prefix"])
+    new_group_names = [f"{cfg['group_name_prefix']}{i:03d}" for i in range(grp_start, grp_start + new_group_count)]
+
+    plan_start = next_index(current_plans, cfg["plan_name_prefix"])
+    new_plan_names = [f"{cfg['plan_name_prefix']}{i:03d}" for i in range(plan_start, plan_start + new_plan_count)]
+
+    # Template split across only the NEW VMs (existing ones keep whatever
+    # they were already assigned).
+    lnx, win = cfg["vm_lnx_template"], cfg["vm_win_template"]
+    if lnx and win:
+        half = (new_vm_count + 1) // 2
+        new_vm_template = {name: (lnx if i < half else win) for i, name in enumerate(new_vm_names)}
+    else:
+        only = lnx or win
+        new_vm_template = {name: only for name in new_vm_names}
+
+    # Datastore assignment: only new VMs get placed; least-loaded across
+    # the full (existing + newly added) datastore list.
+    ds_loads = Counter(v["datastore"] for v in current_vms.values())
+    new_vm_datastore = least_loaded_assign(new_vm_names, ds_names, ds_loads)
+
+    # Group assignment: new VMs, PLUS any existing VMs left unassigned by
+    # a prior --keep-vms cleanup, all need a group — least-loaded across
+    # the full (existing + new) group list.
+    all_group_names = list(current_groups.keys()) + new_group_names
+    unassigned_existing_vms = [name for name, v in current_vms.items() if v.get("group") is None]
+    vms_needing_group = unassigned_existing_vms + new_vm_names
+    group_loads = Counter(v["group"] for v in current_vms.values() if v.get("group"))
+    vm_group_assignment = least_loaded_assign(vms_needing_group, all_group_names, group_loads)
+
+    # Plan assignment: new groups, PLUS any existing groups left
+    # unassigned by a prior --keep-groups cleanup, all need a plan.
+    all_plan_names = list(current_plans) + new_plan_names
+    unassigned_existing_groups = [name for name, g in current_groups.items() if g.get("plan") is None]
+    groups_needing_plan = unassigned_existing_groups + new_group_names
+    plan_loads = Counter(g["plan"] for g in current_groups.values() if g.get("plan"))
+    group_plan_assignment = least_loaded_assign(groups_needing_plan, all_plan_names, plan_loads)
+
+    return {
+        "ds_names": ds_names,
+        "new_vm_names": new_vm_names, "new_group_names": new_group_names, "new_plan_names": new_plan_names,
+        "new_vm_template": new_vm_template, "new_vm_datastore": new_vm_datastore,
+        "vm_group_assignment": vm_group_assignment,      # vm name -> group name, for VMs needing (re)assignment
+        "group_plan_assignment": group_plan_assignment,  # group name -> plan name, for groups needing (re)assignment
+        "all_group_names": all_group_names, "all_plan_names": all_plan_names,
+    }
+
+
+def final_counts(manifest: dict, delta: dict) -> dict:
+    """What the manifest's distribution will look like AFTER applying
+    this delta — used by both the real run's summary and --dry-run."""
+    ds_counts = Counter(v["datastore"] for v in manifest["vms"].values())
+    for name, ds in delta["new_vm_datastore"].items():
+        ds_counts[ds] += 1
+
+    group_counts = Counter()
+    for v in manifest["vms"].values():
+        if v.get("group"):
+            group_counts[v["group"]] += 1
+    for vm_name, grp in delta["vm_group_assignment"].items():
+        group_counts[grp] += 1
+
+    plan_counts = Counter()
+    for g in manifest["groups"].values():
+        if g.get("plan"):
+            plan_counts[g["plan"]] += 1
+    for grp_name, pl in delta["group_plan_assignment"].items():
+        plan_counts[pl] += 1
+
+    return {"ds_counts": ds_counts, "group_counts": group_counts, "plan_counts": plan_counts}
+
+
+# ---------------------------------------------------------------------------
+# Dry run
+# ---------------------------------------------------------------------------
+
+def print_dry_run(manifest: dict, delta: dict):
+    counts = final_counts(manifest, delta)
+
+    print(f"\n  Currently tracked: {len(manifest['vms'])} VM(s), "
+          f"{len(manifest['datastore_names'])} datastore(s), "
+          f"{len(manifest['groups'])} group(s), {len(manifest['plans'])} plan(s)")
+    print(f"  Will add: {len(delta['new_vm_names'])} VM(s), "
+          f"{len(delta['ds_names']) - len(manifest['datastore_names'])} datastore(s), "
+          f"{len(delta['new_group_names'])} group(s), {len(delta['new_plan_names'])} plan(s)")
+
+    if delta["new_vm_names"]:
+        print(f"\n  New VM names: {', '.join(delta['new_vm_names'])}")
+        print(f"  New VM templates: {dict(Counter(delta['new_vm_template'].values()))}")
+    if delta["new_group_names"]:
+        print(f"  New group names: {', '.join(delta['new_group_names'])}")
+    if delta["new_plan_names"]:
+        print(f"  New plan names: {', '.join(delta['new_plan_names'])}")
+
+    print(f"\n  Final VMs per datastore:  {dict(counts['ds_counts'])}")
+    print(f"  Final VMs per group:      {dict(counts['group_counts'])}")
+    print(f"  Final groups per plan:    {dict(counts['plan_counts'])}")
+
+
+def new_group_plan_order(new_plan_names, by_plan):
+    """Process brand-new plans before existing ones get more groups
+    added — order doesn't affect correctness, just keeps the printed
+    output in a sensible sequence."""
+    ordered = [p for p in new_plan_names if p in by_plan]
+    ordered += [p for p in by_plan if p not in ordered]
+    return ordered
+
+
+# ---------------------------------------------------------------------------
+# Real run
+# ---------------------------------------------------------------------------
+
+def run_scale_test(cfg: dict, m: int, n, x: int, y: int, dry_run: bool):
+    manifest = load_manifest()
+    if manifest["vms"] and (manifest.get("source_site") != cfg["source_site"]
+                             or manifest.get("target_site") != cfg["target_site"]):
+        print(f"Error: existing manifest was built against source_site="
+              f"{manifest.get('source_site')!r}/target_site={manifest.get('target_site')!r}, "
+              f"but this config has source_site={cfg['source_site']!r}/"
+              f"target_site={cfg['target_site']!r}. Refusing to mix — run --cleanup first, "
+              f"or fix the config.")
+        sys.exit(1)
+
+    delta = compute_delta(cfg, manifest, m, x, y, n)
+
     print(f"\n{'=' * 70}\n  ERS SCALE TEST\n{'=' * 70}")
-    print(f"  VMs: {m}   Datastores: {n}   Groups: {x}   Plans: {y}")
+    print(f"  Target totals — VMs: {m}   Datastores: {len(delta['ds_names'])}   "
+          f"Groups: {x}   Plans: {y}")
     print(f"  Source site: {cfg['source_site']}   Target site: {cfg['target_site']}")
     if dry_run:
         print("  Mode: DRY RUN — no resources will actually be created")
+        print_dry_run(manifest, delta)
+        return
 
-    plan = build_plan(cfg, m, n, x, y)
-
-    if dry_run:
-        print_dry_run(cfg, plan, m, n, x, y)
+    if not (delta["new_vm_names"] or delta["new_group_names"] or delta["new_plan_names"]
+            or delta["vm_group_assignment"] or delta["group_plan_assignment"]):
+        print("\nNothing to do — already at (or beyond) the requested totals.")
         return
 
     e = ers.instance(profile=cfg["profile"])
     site = e.register_site(cfg["source_site"])
     e.register_site(cfg["target_site"])
 
-    # 1. Create VMs — one at a time, since each needs its own datastore/
-    #    template assignment (the batch --name-prefix/--count helper
-    #    assumes one datastore/template for the whole batch, which doesn't
-    #    fit here).
-    print(f"\n-> Creating {m} VM(s) across {n} datastore(s)...")
-    created_vms = []
-    for name in plan["vm_names"]:
-        result = site.create_vm(name=name, template=plan["vm_template"][name],
-                                 datastore=plan["vm_datastore"][name])
-        if result:
-            created_vms.append(name)
-    print(f"   Created {len(created_vms)}/{m} VM(s).")
+    manifest["source_site"] = cfg["source_site"]
+    manifest["target_site"] = cfg["target_site"]
+    manifest["profile"] = cfg["profile"]
+    manifest["datastore_names"] = delta["ds_names"]
 
-    # 2. Create groups — empty of VMs for now, enrolled in step 4.
-    print(f"\n-> Creating {x} group(s)...")
-    created_groups = []
-    for name in plan["group_names"]:
-        try:
-            e.group.create(name=name, with_policy=cfg["service_level_policy"],
-                            source_site=cfg["source_site"], target_site=cfg["target_site"])
-            created_groups.append(name)
-        except Exception as exc:
-            print(f"   {name}: FAILED ({exc})")
+    # 1. Create only the NEW VMs — skip any that already exist in vCenter
+    #    (idempotent: safe to re-run after a partial failure).
+    new_vm_names = delta["new_vm_names"]
+    if new_vm_names:
+        print(f"\n-> Creating {len(new_vm_names)} new VM(s)...")
+        existing_in_vcenter = site.vms_exist(new_vm_names)
+        if existing_in_vcenter:
+            print(f"   {len(existing_in_vcenter)} already exist in vCenter — skipping creation for those.")
+        for name in new_vm_names:
+            if name not in existing_in_vcenter:
+                result = site.create_vm(name=name, template=delta["new_vm_template"][name],
+                                         datastore=delta["new_vm_datastore"][name])
+                if not result:
+                    continue
+            manifest["vms"][name] = {"datastore": delta["new_vm_datastore"][name],
+                                      "template": delta["new_vm_template"][name], "group": None}
+        print(f"   {len(manifest['vms'])} VM(s) tracked in total.")
 
-    # Save state now, before enrolling/creating plans/running anything —
-    # so --cleanup can tear down what was created even if a later step fails.
-    save_state({
-        "source_site": cfg["source_site"], "target_site": cfg["target_site"],
-        "profile": cfg["profile"],
-        "vm_names": created_vms, "group_names": created_groups, "plan_names": [],
-    })
+    # 2. Create only the NEW groups.
+    new_group_names = delta["new_group_names"]
+    if new_group_names:
+        print(f"\n-> Creating {len(new_group_names)} new group(s)...")
+        for name in new_group_names:
+            try:
+                e.group.create(name=name, with_policy=cfg["service_level_policy"],
+                                source_site=cfg["source_site"], target_site=cfg["target_site"])
+                manifest["groups"][name] = {"plan": None}
+            except Exception as exc:
+                print(f"   {name}: FAILED ({exc})")
 
-    # 3. Wait for the newly created VMs to sync into inventory before
-    #    trying to enroll them — vm.add() resolves names against the
-    #    site's VM inventory, which may not immediately reflect VMs
-    #    created moments ago.
-    print(f"\n-> Waiting {cfg['sync_wait_seconds']}s for newly created VMs to sync into inventory...")
-    time.sleep(cfg["sync_wait_seconds"])
+    save_manifest(manifest)  # save before the sync wait / enrollment, in case those fail
 
-    # 4. Enroll VMs into their assigned group
-    print(f"\n-> Enrolling VMs into groups...")
-    for group_name in created_groups:
-        vms = [v for v in plan["group_vms"].get(group_name, []) if v in created_vms]
-        if vms:
-            e.vm.add(*vms, with_group=group_name)
+    # 3. Wait for newly created VMs to sync into inventory before
+    #    enrolling — vm.add() resolves names against the site's VM
+    #    inventory, which may not immediately reflect VMs just created.
+    if new_vm_names:
+        print(f"\n-> Waiting {cfg['sync_wait_seconds']}s for newly created VMs to sync into inventory...")
+        time.sleep(cfg["sync_wait_seconds"])
 
-    # 5. Create plans, each with its assigned groups already attached —
-    #    groups exist and are populated by this point, so there's no
-    #    need for the create-empty-then-plan.add() workaround anymore.
-    print(f"\n-> Creating {y} plan(s)...")
-    created_plans = []
-    for plan_name, groups in plan["plan_groups"].items():
-        groups = [g for g in groups if g in created_groups]
-        if not groups:
-            continue
-        try:
-            e.plan.create(name=plan_name, with_groups=groups, target_site=cfg["target_site"])
-            created_plans.append(plan_name)
-        except Exception as exc:
-            print(f"   {plan_name}: FAILED ({exc})")
+    # 4. Enroll every VM that needs a group (new ones, plus any orphaned
+    #    by a prior --keep-vms cleanup) into its assigned group.
+    vm_group_assignment = delta["vm_group_assignment"]
+    if vm_group_assignment:
+        print(f"\n-> Enrolling {len(vm_group_assignment)} VM(s) into groups...")
+        by_group = {}
+        for vm_name, grp in vm_group_assignment.items():
+            by_group.setdefault(grp, []).append(vm_name)
+        for grp, vms in by_group.items():
+            if grp in manifest["groups"]:  # only enroll into groups that actually exist
+                e.vm.add(*vms, with_group=grp)
+                for vm_name in vms:
+                    manifest["vms"][vm_name]["group"] = grp
 
-    save_state({
-        "source_site": cfg["source_site"], "target_site": cfg["target_site"],
-        "profile": cfg["profile"],
-        "vm_names": created_vms, "group_names": created_groups, "plan_names": created_plans,
-    })
+    # 5. Create NEW plans directly with their assigned groups already
+    #    attached, and attach any orphaned groups (from a prior
+    #    --keep-groups cleanup) or newly-grown groups to existing plans.
+    group_plan_assignment = delta["group_plan_assignment"]
+    new_plan_names = delta["new_plan_names"]
+    if group_plan_assignment:
+        print(f"\n-> Assigning {len(group_plan_assignment)} group(s) to plans...")
+        by_plan = {}
+        for grp_name, pl in group_plan_assignment.items():
+            by_plan.setdefault(pl, []).append(grp_name)
+
+        for plan_name in new_group_plan_order(new_plan_names, by_plan):
+            groups_for_plan = by_plan.get(plan_name, [])
+            if plan_name in new_plan_names:
+                try:
+                    e.plan.create(name=plan_name, with_groups=groups_for_plan,
+                                   target_site=cfg["target_site"])
+                    manifest["plans"].append(plan_name)
+                    for g in groups_for_plan:
+                        manifest["groups"][g]["plan"] = plan_name
+                except Exception as exc:
+                    print(f"   {plan_name}: FAILED ({exc})")
+            else:
+                # existing plan gaining more groups
+                e.plan.add(plan_name, groups_for_plan)
+                for g in groups_for_plan:
+                    manifest["groups"][g]["plan"] = plan_name
+
+    save_manifest(manifest)
+
+    all_groups = list(manifest["groups"].keys())
+    all_plans = list(manifest["plans"])
 
     # 6. Run protection on every group — waits for completion, since test
     #    failover needs a completed snapshot to work from.
-    print(f"\n-> Running protection for {len(created_groups)} group(s)...")
-    if created_groups:
-        e.group.run(*created_groups, with_monitor=True)
+    print(f"\n-> Running protection for {len(all_groups)} group(s)...")
+    if all_groups:
+        e.group.run(*all_groups, with_monitor=True)
 
     # 7. Test failover on every plan
-    print(f"\n-> Running test failover for {len(created_plans)} plan(s)...")
-    if created_plans:
-        e.plan.failover("test", *created_plans, with_monitor=True)
+    print(f"\n-> Running test failover for {len(all_plans)} plan(s)...")
+    if all_plans:
+        e.plan.failover("test", *all_plans, with_monitor=True)
 
+    counts = final_counts(manifest, {"new_vm_datastore": {}, "vm_group_assignment": {},
+                                      "group_plan_assignment": {}})
     print(f"\n{'=' * 70}\n  SCALE TEST COMPLETE\n{'=' * 70}")
-    print(f"  VMs created:    {len(created_vms)}/{m}")
-    print(f"  Groups created: {len(created_groups)}/{x}")
-    print(f"  Plans created:  {len(created_plans)}/{y}")
+    print(f"  Total VMs:    {len(manifest['vms'])}")
+    print(f"  Total groups: {len(manifest['groups'])}")
+    print(f"  Total plans:  {len(manifest['plans'])}")
+    print(f"  VMs per datastore: {dict(counts['ds_counts'])}")
+    print(f"  VMs per group:     {dict(counts['group_counts'])}")
+    print(f"  Groups per plan:   {dict(counts['plan_counts'])}")
     print(f"\n  Run 'ers-scale-test --cleanup' to tear all of this down.")
     e.flush()
 
 
-def run_cleanup(cfg: dict):
-    state = load_state()
-    if not state:
-        print(f"No scale-test state found ({state_path(STATE_FILE)}) — nothing to clean up.")
+# ---------------------------------------------------------------------------
+# Cleanup
+# ---------------------------------------------------------------------------
+
+def run_cleanup(cfg: dict, keep_vms: bool, keep_groups: bool):
+    manifest = load_manifest()
+    if not manifest["vms"] and not manifest["groups"] and not manifest["plans"]:
+        print(f"No scale-test manifest found ({state_path(MANIFEST_FILE)}) — nothing to clean up.")
         return
 
-    e = ers.instance(profile=state.get("profile", cfg["profile"]))
-    site = e.register_site(state["source_site"])
+    e = ers.instance(profile=manifest.get("profile", cfg["profile"]))
+    site = e.register_site(manifest["source_site"])
 
-    plan_names = state.get("plan_names", [])
-    group_names = state.get("group_names", [])
-    vm_names = state.get("vm_names", [])
+    plan_names = list(manifest["plans"])
+    group_names = list(manifest["groups"].keys())
+    vm_names = list(manifest["vms"].keys())
 
-    print(f"\nTearing down: {len(plan_names)} plan(s), {len(group_names)} group(s), "
-          f"{len(vm_names)} VM(s)")
+    mode = "full teardown" if not (keep_vms or keep_groups) else \
+           ("keep groups (detach from plans, delete plans only)" if keep_groups else
+            "keep VMs (delete groups/plans, leave VMs in vCenter)")
+    print(f"\nCleanup mode: {mode}")
+    print(f"Tracked: {len(plan_names)} plan(s), {len(group_names)} group(s), {len(vm_names)} VM(s)")
+
+    if plan_names:
+        print(f"\n-> Running plan cleanup for {len(plan_names)} plan(s) "
+              f"(reverting test failover)...")
+        results = e.plan.cleanup(*plan_names, with_monitor=True)
+        failed = [r["plan"] for r in results if r.get("status") != "SUCCEEDED"]
+        if failed:
+            print(f"   Warning: plan cleanup did not succeed for: {', '.join(failed)}. "
+                  f"Continuing with the rest of teardown anyway, but these may leave "
+                  f"orphaned test-failover resources behind in vCenter.")
+        else:
+            print(f"   Plan cleanup succeeded for all {len(plan_names)} plan(s).")
+
+    if keep_groups:
+        # Detach every group from its plan before deleting the plan --
+        # the API rejects deleting a plan that still references groups.
+        if plan_names:
+            print(f"\n-> Detaching groups from {len(plan_names)} plan(s)...")
+            groups_by_plan = {}
+            for name, g in manifest["groups"].items():
+                if g.get("plan"):
+                    groups_by_plan.setdefault(g["plan"], []).append(name)
+            for plan_name in plan_names:
+                groups = groups_by_plan.get(plan_name, [])
+                if groups:
+                    e.plan.remove(plan_name, groups)
+            print(f"-> Deleting {len(plan_names)} plan(s)...")
+            e.plan.delete(*plan_names)
+        # Groups and VMs are left entirely alone.
+        for name in manifest["groups"]:
+            manifest["groups"][name]["plan"] = None
+        manifest["plans"] = []
+        save_manifest(manifest)
+        print("\nCleanup complete — groups and VMs left in place, plans removed.")
+        e.flush()
+        return
 
     if group_names:
         print(f"\n-> Unenrolling VMs from {len(group_names)} group(s)...")
@@ -305,14 +558,29 @@ def run_cleanup(cfg: dict):
         print(f"\n-> Deleting {len(plan_names)} plan(s)...")
         e.plan.delete(*plan_names)
 
+    if keep_vms:
+        for name in manifest["vms"]:
+            manifest["vms"][name]["group"] = None
+        manifest["groups"] = {}
+        manifest["plans"] = []
+        save_manifest(manifest)
+        print("\nCleanup complete — VMs left in vCenter, unenrolled; groups/plans removed.")
+        e.flush()
+        return
+
     if vm_names:
         print(f"\n-> Deleting {len(vm_names)} VM(s)...")
         for name in vm_names:
             site.delete_vm(name)
 
+    delete_manifest()
     print("\nCleanup complete.")
     e.flush()
 
+
+# ---------------------------------------------------------------------------
+# CLI
+# ---------------------------------------------------------------------------
 
 def main():
     parser = argparse.ArgumentParser(
@@ -322,31 +590,36 @@ def main():
     )
     parser.add_argument("--config", default=DEFAULT_CONFIG_PATH,
                          help=f"Path to config file (default: {DEFAULT_CONFIG_PATH})")
-    parser.add_argument("--vms", type=int, metavar="M", help="Number of VMs to create")
+    parser.add_argument("--vms", type=int, metavar="M", help="Desired total number of VMs")
     parser.add_argument("--datastores", type=int, metavar="N",
-                         help="Number of datastores to distribute VMs across. Not required if "
-                              "the config's datastore_names is set — its length is used instead.")
-    parser.add_argument("--groups", type=int, metavar="X",
-                         help="Number of groups to distribute VMs across")
-    parser.add_argument("--plans", type=int, metavar="Y",
-                         help="Number of plans to distribute groups across")
+                         help="Desired total number of datastores. Not required if the "
+                              "config's datastore_names is set — its length is used instead.")
+    parser.add_argument("--groups", type=int, metavar="X", help="Desired total number of groups")
+    parser.add_argument("--plans", type=int, metavar="Y", help="Desired total number of plans")
     parser.add_argument("--dry-run", action="store_true",
-                         help="Preview the plan (names, distribution) without creating anything")
-    parser.add_argument("--sync-wait", type=int, metavar="SECONDS",
-                         help="Seconds to wait after VM creation, before enrolling them into "
-                              "groups, for vCenter->Pure1 inventory sync (default: 60, or the "
-                              "config's sync_wait_seconds)")
+                         help="Preview the delta (names, final distribution) without creating anything")
     parser.add_argument("--cleanup", action="store_true",
-                         help="Tear down everything created by the last scale-test run")
+                         help="Tear down everything tracked in the scale-test manifest")
+    parser.add_argument("--keep-vms", action="store_true",
+                         help="With --cleanup: delete groups/plans, leave VMs in vCenter (unenrolled)")
+    parser.add_argument("--keep-groups", action="store_true",
+                         help="With --cleanup: detach groups from plans and delete plans only; "
+                              "groups and their VMs are left exactly as they are")
     args = parser.parse_args()
 
     cfg = load_config(args.config)
-    if args.sync_wait is not None:
-        cfg["sync_wait_seconds"] = args.sync_wait
 
     if args.cleanup:
-        run_cleanup(cfg)
+        if args.keep_vms and args.keep_groups:
+            print("Error: --keep-vms and --keep-groups can't both be given — "
+                  "--keep-groups already implies keeping the VMs too.")
+            sys.exit(1)
+        run_cleanup(cfg, keep_vms=args.keep_vms, keep_groups=args.keep_groups)
         return
+
+    if args.keep_vms or args.keep_groups:
+        print("Error: --keep-vms/--keep-groups only apply with --cleanup")
+        sys.exit(1)
 
     has_datastore_names = bool(cfg.get("datastore_names"))
 
@@ -358,6 +631,7 @@ def main():
         print(f"Error: {', '.join(missing)} are required (unless using --cleanup)")
         sys.exit(1)
 
+    n = None
     if has_datastore_names:
         n = len(cfg["datastore_names"])
         if args.datastores is not None and args.datastores != n:

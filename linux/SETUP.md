@@ -396,10 +396,19 @@ only if every selected test PASSed; `SKIP`ped tests don't count against it.
 
 ## 7. Scale testing
 
-`ers-scale-test` creates M VMs distributed evenly across N datastores,
-distributes those VMs evenly across X application groups, distributes
-those X groups evenly across Y recovery plans, then runs protection on
-every group and test failover on every plan.
+`ers-scale-test` creates M VMs distributed across N datastores,
+distributes those VMs across X application groups, distributes those X
+groups across Y recovery plans, then runs protection on every group and
+test failover on every plan.
+
+**`--vms`/`--datastores`/`--groups`/`--plans` are desired TOTALS, not
+deltas.** A persistent manifest (`~/.ers/state/.scale_test_manifest.json`)
+tracks everything created so far, so re-running with higher numbers is
+additive — it only creates the difference, and never moves or recreates
+anything that already exists. New items always go to whichever existing
+bucket (datastore/group/plan) currently has the fewest, so scaling up
+tops off under-filled buckets and fills new ones first; on a first/fresh
+run (nothing in the manifest yet) this is equivalent to plain round-robin.
 
 Edit `scale-test-config.json`:
 ```json
@@ -409,46 +418,60 @@ Edit `scale-test-config.json`:
   "source_site": "prod-site",
   "target_site": "drdc-site",
   "service_level_policy": "YOUR-POLICY-NAME",
-  "group_name_prefix": "ers-grp-",
-  "plan_name_prefix": "ers-plan-",
-  "vm_name_prefix": "ers-vm-",
-  "datastore_name_prefix": "ers-ds-",
+  "group_name_prefix": "ers-scale-grp-",
+  "plan_name_prefix": "ers-scale-plan-",
+  "vm_name_prefix": "ers-scale-vm-",
+  "datastore_name_prefix": "ers-scale-ds-",
   "vm_lnx_template": "YOUR-LINUX-TEMPLATE-NAME",
   "vm_win_template": "YOUR-WINDOWS-TEMPLATE-NAME"
 }
 ```
 
 **Datastores are not created** — `datastore_name_prefix` + N must already
-exist on `source_site` (e.g. `datastore_name_prefix="ers-scale-ds-"` and
-`--datastores 10` expects `ers-scale-ds-001` through `ers-scale-ds-010` to
-already be there). If you want to target specific existing datastores by
-name instead, set `datastore_names` in the config to a list of them —
-when set, it takes precedence over `datastore_name_prefix` entirely, and
-`--datastores` is no longer required on the command line (its count is
-taken from `datastore_names`' length instead). If only one of
-`vm_lnx_template`/`vm_win_template` is given, every VM uses it; if both
-are given, the first half of the VMs (by index) use the Linux template
-and the second half use the Windows template.
+exist on `source_site`. If you want to target specific existing
+datastores by name instead, set `datastore_names` in the config to a
+list of them — when set, it takes precedence over `datastore_name_prefix`
+entirely, and `--datastores` is no longer required on the command line
+(its count comes from `datastore_names`' length instead). Either way,
+datastore names are unioned into the manifest across runs — none are
+ever removed automatically, even if you later shrink the config's list.
+If only one of `vm_lnx_template`/`vm_win_template` is given, every new VM
+uses it; if both are given, new VMs split evenly between them.
 
-VM/group/plan names are `{prefix}{NNN}` (3-digit, zero-padded), and
-distribution is round-robin across the target buckets — even when the
-counts don't divide evenly, no bucket differs from another by more than 1.
+VM/group/plan names are `{prefix}{NNN}` (3-digit, zero-padded) and
+continue the existing numbering sequence across runs — a second run
+never collides with names the first run already created.
 
 ```bash
-# Preview the plan (names, distribution) without creating anything
-ers-scale-test --vms 100 --datastores 10 --groups 4 --plans 2 --dry-run
+# First run
+ers-scale-test --vms 4 --datastores 1 --groups 2 --plans 1
+# -> 4 VMs on 1 datastore, 2 per group, 1 plan with both groups
 
-# Run it for real
-ers-scale-test --vms 100 --datastores 10 --groups 4 --plans 2
-# -> 100 VMs, 10 per datastore, 25 per group, 2 groups per plan
+# Scale up -- additive: adds 16 VMs (to reach 20), 3 datastores (to reach
+# 4), 2 groups (to reach 4), 1 plan (to reach 2). Existing VMs/groups
+# never move to a different datastore/group.
+ers-scale-test --vms 20 --datastores 4 --groups 4 --plans 2 --dry-run   # preview first
+ers-scale-test --vms 20 --datastores 4 --groups 4 --plans 2
+# -> 20 VMs, 5 per datastore, 5 per group, 2 groups per plan
 
-ers-scale-test --vms 100 --datastores 5 --groups 10 --plans 1
-# -> 100 VMs, 20 per datastore, 10 per group, all 10 groups in the 1 plan
-
-ers-scale-test --vms 100 --groups 10 --plans 1
-# -> 100 VMs, 20 per datastore (explicit datastores in config), 10 per group,
-#    all 10 groups in the 1 plan
-
-# Tear everything the last run created back down
+# Tear everything down
 ers-scale-test --cleanup
+
+# Partial teardown, resumable later:
+ers-scale-test --cleanup --keep-vms      # delete groups/plans; VMs stay in vCenter, unenrolled
+ers-scale-test --cleanup --keep-groups   # detach groups from plans, delete plans;
+                                          # groups and their VM membership are untouched
 ```
+
+`--keep-vms`/`--keep-groups` can't be combined (`--keep-groups` already
+implies keeping the VMs, since they're still enrolled in the groups you
+kept). Whatever's left behind stays in the manifest as "unassigned," so
+the next scale-up run picks it back up automatically — orphaned VMs get
+re-enrolled into a group (no re-creation), orphaned groups get attached
+to a plan (no re-creating the group) — rather than creating duplicates
+alongside what's already there.
+
+Either way, `--cleanup` always runs plan cleanup first (reverting test
+failover) and waits for it to finish before touching anything else, since
+groups/plans can't safely be torn down while still mid-failover.
+
