@@ -401,10 +401,6 @@ distributes those VMs evenly across X application groups, distributes
 those X groups evenly across Y recovery plans, then runs protection on
 every group and test failover on every plan.
 
-```bash
-cp scale-test-config.json scale-test-config.json.local   # or edit in place
-```
-
 Edit `scale-test-config.json`:
 ```json
 {
@@ -413,10 +409,10 @@ Edit `scale-test-config.json`:
   "source_site": "prod-site",
   "target_site": "drdc-site",
   "service_level_policy": "YOUR-POLICY-NAME",
-  "group_name_prefix": "ers-scale-grp-",
-  "plan_name_prefix": "ers-scale-plan-",
-  "vm_name_prefix": "ers-scale-vm-",
-  "datastore_name_prefix": "ers-scale-ds-",
+  "group_name_prefix": "ers-grp-",
+  "plan_name_prefix": "ers-plan-",
+  "vm_name_prefix": "ers-vm-",
+  "datastore_name_prefix": "ers-ds-",
   "vm_lnx_template": "YOUR-LINUX-TEMPLATE-NAME",
   "vm_win_template": "YOUR-WINDOWS-TEMPLATE-NAME"
 }
@@ -449,12 +445,10 @@ ers-scale-test --vms 100 --datastores 10 --groups 4 --plans 2
 ers-scale-test --vms 100 --datastores 5 --groups 10 --plans 1
 # -> 100 VMs, 20 per datastore, 10 per group, all 10 groups in the 1 plan
 
+ers-scale-test --vms 100 --groups 10 --plans 1
+# -> 100 VMs, 20 per datastore (explicit datastores in config), 10 per group,
+#    all 10 groups in the 1 plan
+
 # Tear everything the last run created back down
 ers-scale-test --cleanup
 ```
-
-`--cleanup` reads `~/.ers/state/.last_scale_test.json` — written right
-after resource creation, before groups are run or plans are failed over —
-so it can tear down what was created even if a later step (a group run or
-test failover) fails partway through.
-
