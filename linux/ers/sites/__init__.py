@@ -14,15 +14,18 @@
 
 from .base import Site
 from .vsphere import VSphereSite, is_vsphere_instance
+from .aws import AwsSite, is_aws_instance
 
 #: site_type string (as used in `[site <type> <name>]`) -> class
 SITE_TYPES = {
     "vsphere": VSphereSite,
+    "aws": AwsSite,
 }
 
 #: ordered list of (detector, class) for register_site(name, instance) dispatch
 INSTANCE_DETECTORS = [
     (is_vsphere_instance, VSphereSite),
+    (is_aws_instance, AwsSite),
 ]
 
-__all__ = ["Site", "VSphereSite", "SITE_TYPES", "INSTANCE_DETECTORS"]
+__all__ = ["Site", "VSphereSite", "AwsSite", "SITE_TYPES", "INSTANCE_DETECTORS"]

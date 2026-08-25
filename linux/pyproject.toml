@@ -7,6 +7,9 @@ name = "ers-sdk"
 version = "2.7.0"
 dependencies = ["PyJWT", "cryptography", "requests", "pyVmomi"]
 
+[project.optional-dependencies]
+aws = ["boto3"]
+
 [project.scripts]
 ers-cli = "ers_cli:main"
 ers-system-test = "ers_system_test:main"

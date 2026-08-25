@@ -62,11 +62,26 @@ class VmResource:
         return group
 
     def _inventory(self, site_id: str, target_site_type: str = "VSPHERE") -> list:
+        """Fetches the FULL VM inventory for this site, paginating
+        through all results — the server has a default page size
+        (typically ~25 items) and silently truncates if no limit/
+        pagination is used, which causes vm.add() to report VMs
+        'not found in inventory' even when they exist and have
+        fully synced."""
         ers = self._ers
-        params = {"offset": 0, "deployment_id": ers.deployment_id, "tag_ids": "",
-                  "site_ids": site_id, "target_site_type": target_site_type}
-        data = ers.api.get(VM_INVENTORY_PATH, params=params)
-        return data.get("items") or []
+        all_items = []
+        params = {"offset": 0, "limit": 300, "deployment_id": ers.deployment_id,
+                  "tag_ids": "", "site_ids": site_id,
+                  "target_site_type": target_site_type}
+        while True:
+            data = ers.api.get(VM_INVENTORY_PATH, params=params)
+            items = data.get("items") or []
+            all_items.extend(items)
+            token = data.get("continuation_token")
+            if not token or not items:
+                break
+            params["continuation_token"] = token
+        return all_items
 
     # -- list -----------------------------------------------------------
 
