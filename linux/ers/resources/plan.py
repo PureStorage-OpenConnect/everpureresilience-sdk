@@ -364,9 +364,10 @@ class PlanResource:
                                        params={"deployment_id": ers.deployment_id, "recovery_plan_id": plan_id},
                                        body={})
                 op_id, status, optype = self._extract(result)
-                if with_monitor:
-                    status = poll_until_terminal(ers.api, ers.deployment_id, CLEANUP_PATH, op_id,
-                                                  action, interval, max_polls, out=ers.output.out)
+                # Don't poll here — collect the op and poll after all
+                # cleanups are kicked off (see the batch-poll block
+                # below the loop), so multiple plans run in parallel
+                # rather than serially.
 
             elif action == "failback":
                 if not site:
@@ -443,14 +444,32 @@ class PlanResource:
                                    "plan_id": plan_id, "plan_name": plan_name}
                 self._save_ops(ops)
 
-                extra = {"failover_type": FAILOVER_QUERY_TYPE_MAP[action.split("_")[0]]}
-                if with_monitor:
-                    status = poll_until_terminal(ers.api, ers.deployment_id, FAILOVER_PATH, op_id,
-                                                  action, interval, max_polls, extra_params=extra,
-                                                  out=ers.output.out)
+                # Don't poll here — collected and batch-polled after all
+                # plans are kicked off (see the batch-poll block below).
 
             plan_state[state_key] = {"last_action": action, "last_status": status, "op_id": op_id}
             results.append({"plan": plan_name, "op_id": op_id, "status": status, "type": optype})
+
+        # Batch-poll: for actions that kicked off multiple operations
+        # above without polling inline (cleanup, failover), poll them
+        # all now — they've been running in parallel on the server since
+        # being kicked off, so this just waits for all to finish rather
+        # than serializing them.
+        if with_monitor and action in ("cleanup", "test_failover", "prod_failover"):
+            for r in results:
+                if r.get("op_id") and r["status"] not in ("SUCCEEDED", "FAILED", "SKIPPED"):
+                    extra_params = {}
+                    if action in ("test_failover", "prod_failover"):
+                        extra_params = {"failover_type": FAILOVER_QUERY_TYPE_MAP[action.split("_")[0]]}
+                    path = CLEANUP_PATH if action == "cleanup" else FAILOVER_PATH
+                    r["status"] = poll_until_terminal(
+                        ers.api, ers.deployment_id, path, r["op_id"],
+                        f"{action}: {r['plan']}", interval, max_polls,
+                        extra_params=extra_params if extra_params else None,
+                        out=ers.output.out)
+                    plan_state[r["plan"].lower()] = {"last_action": action,
+                                                      "last_status": r["status"],
+                                                      "op_id": r["op_id"]}
 
         self._save_state(plan_state)
         ers.output.out_json("plan_run", results)
