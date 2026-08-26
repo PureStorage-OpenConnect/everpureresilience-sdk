@@ -62,25 +62,33 @@ class VmResource:
         return group
 
     def _inventory(self, site_id: str, target_site_type: str = "VSPHERE") -> list:
-        """Fetches the FULL VM inventory for this site, paginating
-        through all results — the server has a default page size
-        (typically ~25 items) and silently truncates if no limit/
-        pagination is used, which causes vm.add() to report VMs
-        'not found in inventory' even when they exist and have
-        fully synced."""
+        """Fetches the FULL VM inventory for this site, paginating via
+        offset — this endpoint returns continuation_token: null even
+        when more results exist (confirmed: 298 items returned out of
+        500 total with token=null), so continuation_token can't be
+        relied on. Instead, increment offset by the page size and keep
+        going until an empty page is returned or we've fetched at least
+        total_item_count items."""
         ers = self._ers
         all_items = []
-        params = {"offset": 0, "limit": 300, "deployment_id": ers.deployment_id,
-                  "tag_ids": "", "site_ids": site_id,
-                  "target_site_type": target_site_type}
+        page_size = 300
+        offset = 0
+        total = None
         while True:
+            params = {"offset": offset, "limit": page_size,
+                      "deployment_id": ers.deployment_id,
+                      "tag_ids": "", "site_ids": site_id,
+                      "target_site_type": target_site_type}
             data = ers.api.get(VM_INVENTORY_PATH, params=params)
             items = data.get("items") or []
             all_items.extend(items)
-            token = data.get("continuation_token")
-            if not token or not items:
+            if total is None:
+                total = data.get("total_item_count")
+            if not items:
                 break
-            params["continuation_token"] = token
+            offset += len(items)
+            if total is not None and offset >= total:
+                break
         return all_items
 
     # -- list -----------------------------------------------------------
