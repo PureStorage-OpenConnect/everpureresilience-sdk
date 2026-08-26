@@ -576,10 +576,40 @@ def run_scale_test(cfg: dict, m: int, n, x: int, y: int, dry_run: bool):
                 pass
         if enrollment_changed:
             save_manifest(manifest)
-            # Recompute the delta with corrected enrollment state so
-            # only genuinely-unassigned VMs get new group assignments.
             delta = compute_delta(cfg, manifest, m, x, y, n)
             print(f"   Enrollment state synced — recomputed assignments.")
+        else:
+            print(f"   Manifest already consistent with Pure1.")
+
+    # 4b. Same sync for plan memberships — if groups are already in plans
+    #     from a prior run, honor those rather than redistributing (a
+    #     group can only be in one plan, and plans run in parallel).
+    if manifest["plans"]:
+        print(f"-> Syncing actual plan membership state from Pure1...")
+        plan_changed = False
+        try:
+            # Build group ID->name map once for reverse-lookup (the plan
+            # endpoint returns group references with name: "N/A")
+            group_id_to_name = {}
+            all_group_matched, _ = e.group._resolve(list(manifest["groups"].keys()))
+            for g in all_group_matched:
+                group_id_to_name[g["id"]] = g["name"]
+
+            plan_matched, _ = e.plan._resolve(list(manifest["plans"]))
+            for plan_obj in plan_matched:
+                plan_name = plan_obj.get("name")
+                for pg in (plan_obj.get("groups") or []):
+                    pg_name = group_id_to_name.get(pg.get("id"))
+                    if pg_name and pg_name in manifest["groups"]:
+                        if manifest["groups"][pg_name].get("plan") != plan_name:
+                            manifest["groups"][pg_name]["plan"] = plan_name
+                            plan_changed = True
+        except Exception:
+            pass
+        if plan_changed:
+            save_manifest(manifest)
+            delta = compute_delta(cfg, manifest, m, x, y, n)
+            print(f"   Plan membership synced — recomputed assignments.")
         else:
             print(f"   Manifest already consistent with Pure1.")
 
