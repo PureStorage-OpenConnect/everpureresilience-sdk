@@ -529,8 +529,38 @@ def run_scale_test(cfg: dict, m: int, n, x: int, y: int, dry_run: bool):
         for vm_name, grp in vm_group_assignment.items():
             by_group.setdefault(grp, []).append(vm_name)
         for grp, vms in by_group.items():
-            if grp in manifest["groups"]:  # only enroll into groups that actually exist
-                e.vm.add(*vms, with_group=grp)
+            if grp not in manifest["groups"]:
+                continue
+            # Check which VMs are already enrolled in this group (from a
+            # prior run that created the group + enrolled VMs before the
+            # manifest was wiped). Skip those to avoid a 422 on re-enroll.
+            try:
+                already_enrolled = set()
+                matched, _ = e.group._resolve([grp])
+                if matched:
+                    grp_id = matched[0]["id"]
+                    enrolled_data = e.api.get(
+                        "/pure-protect/api/1.latest/enrolled-virtual-machines",
+                        params={"offset": 0, "limit": 300,
+                                "deployment_id": e.deployment_id,
+                                "application_group_ids": grp_id})
+                    for item in (enrolled_data.get("items") or []):
+                        pvm = item.get("primary_virtual_machine") or {}
+                        name = pvm.get("name")
+                        if name:
+                            already_enrolled.add(name)
+                vms_to_enroll = [v for v in vms if v not in already_enrolled]
+                skipped = len(vms) - len(vms_to_enroll)
+                if skipped:
+                    print(f"   {grp}: {skipped} VM(s) already enrolled — skipping those.")
+                if vms_to_enroll:
+                    e.vm.add(*vms_to_enroll, with_group=grp)
+                for vm_name in vms:
+                    manifest["vms"][vm_name]["group"] = grp
+            except Exception as exc:
+                print(f"   {grp}: enrollment FAILED ({exc}) — continuing with next group.")
+                # Still mark VMs as assigned in the manifest so a re-run
+                # can retry rather than losing the assignment entirely.
                 for vm_name in vms:
                     manifest["vms"][vm_name]["group"] = grp
 
