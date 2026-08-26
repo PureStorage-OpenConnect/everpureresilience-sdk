@@ -138,6 +138,38 @@ def load_manifest() -> dict:
     return manifest
 
 
+ENROLLED_VMS_PATH = "/pure-protect/api/1.latest/enrolled-virtual-machines"
+
+
+def _fetch_all_enrolled_names(e, group_id: str) -> set:
+    """Fetches ALL enrolled VM names for a group, with offset-based
+    pagination (this endpoint ignores limit= and returns a small
+    default page size, same as the inventory endpoint)."""
+    all_names = set()
+    offset = 0
+    total = None
+    while True:
+        data = e.api.get(ENROLLED_VMS_PATH, params={
+            "offset": offset, "limit": 300,
+            "deployment_id": e.deployment_id,
+            "application_group_ids": group_id,
+        })
+        items = data.get("items") or []
+        if total is None:
+            total = data.get("total_item_count")
+        for item in items:
+            pvm = item.get("primary_virtual_machine") or {}
+            name = pvm.get("name")
+            if name:
+                all_names.add(name)
+        if not items:
+            break
+        offset += len(items)
+        if total is not None and offset >= total:
+            break
+    return all_names
+
+
 def save_manifest(manifest: dict):
     with open(state_path(MANIFEST_FILE), "w") as f:
         json.dump(manifest, f, indent=2)
@@ -520,7 +552,38 @@ def run_scale_test(cfg: dict, m: int, n, x: int, y: int, dry_run: bool):
                   f"falling back to fixed {cfg['sync_wait_seconds']}s wait.")
             time.sleep(cfg["sync_wait_seconds"])
 
-    # 4. Enroll every VM that needs a group (new ones, plus any orphaned
+    # 4. Sync actual enrollment state from Pure1 — if VMs are already
+    #    enrolled in groups (from a prior run whose manifest was
+    #    wiped/stale), record that in the manifest BEFORE computing
+    #    who needs enrollment. Without this, the tool would try to
+    #    re-enroll VMs into different groups than where they already
+    #    are, getting 422s because a VM can only be in one group.
+    if manifest["groups"]:
+        print(f"\n-> Syncing actual enrollment state from Pure1...")
+        enrollment_changed = False
+        for grp_name in list(manifest["groups"].keys()):
+            try:
+                matched, _ = e.group._resolve([grp_name])
+                if not matched:
+                    continue
+                grp_id = matched[0]["id"]
+                enrolled_names = _fetch_all_enrolled_names(e, grp_id)
+                for vm_name in enrolled_names:
+                    if vm_name in manifest["vms"] and manifest["vms"][vm_name].get("group") != grp_name:
+                        manifest["vms"][vm_name]["group"] = grp_name
+                        enrollment_changed = True
+            except Exception:
+                pass
+        if enrollment_changed:
+            save_manifest(manifest)
+            # Recompute the delta with corrected enrollment state so
+            # only genuinely-unassigned VMs get new group assignments.
+            delta = compute_delta(cfg, manifest, m, x, y, n)
+            print(f"   Enrollment state synced — recomputed assignments.")
+        else:
+            print(f"   Manifest already consistent with Pure1.")
+
+    # 5. Enroll every VM that needs a group (new ones, plus any orphaned
     #    by a prior --keep-vms cleanup) into its assigned group.
     vm_group_assignment = delta["vm_group_assignment"]
     if vm_group_assignment:
@@ -531,24 +594,14 @@ def run_scale_test(cfg: dict, m: int, n, x: int, y: int, dry_run: bool):
         for grp, vms in by_group.items():
             if grp not in manifest["groups"]:
                 continue
-            # Check which VMs are already enrolled in this group (from a
-            # prior run that created the group + enrolled VMs before the
-            # manifest was wiped). Skip those to avoid a 422 on re-enroll.
+            # Check which VMs are already enrolled in this group — skip
+            # those to avoid a 422 on re-enroll.
             try:
                 already_enrolled = set()
                 matched, _ = e.group._resolve([grp])
                 if matched:
                     grp_id = matched[0]["id"]
-                    enrolled_data = e.api.get(
-                        "/pure-protect/api/1.latest/enrolled-virtual-machines",
-                        params={"offset": 0, "limit": 300,
-                                "deployment_id": e.deployment_id,
-                                "application_group_ids": grp_id})
-                    for item in (enrolled_data.get("items") or []):
-                        pvm = item.get("primary_virtual_machine") or {}
-                        name = pvm.get("name")
-                        if name:
-                            already_enrolled.add(name)
+                    already_enrolled = _fetch_all_enrolled_names(e, grp_id)
                 vms_to_enroll = [v for v in vms if v not in already_enrolled]
                 skipped = len(vms) - len(vms_to_enroll)
                 if skipped:

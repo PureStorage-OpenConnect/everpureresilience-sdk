@@ -212,11 +212,24 @@ class VmResource:
             pattern = None
             search_term = ",".join(n.strip() for n in names)
 
-        data = ers.api.get(ENROLLED_VMS_PATH, params={
-            "offset": 0, "limit": 300, "deployment_id": ers.deployment_id,
-            "application_group_ids": group_id, "search": search_term,
-        })
-        results = data.get("items") or []
+        all_results = []
+        offset = 0
+        total = None
+        while True:
+            data = ers.api.get(ENROLLED_VMS_PATH, params={
+                "offset": offset, "limit": 300, "deployment_id": ers.deployment_id,
+                "application_group_ids": group_id, "search": search_term,
+            })
+            items = data.get("items") or []
+            all_results.extend(items)
+            if total is None:
+                total = data.get("total_item_count")
+            if not items:
+                break
+            offset += len(items)
+            if total is not None and offset >= total:
+                break
+        results = all_results
 
         if with_wildcard:
             matched = [v for v in results if fnmatch.fnmatch(self._enrolled_name(v), pattern)]
