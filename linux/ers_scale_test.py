@@ -213,9 +213,16 @@ def compute_delta(cfg: dict, manifest: dict, m: int, x: int, y: int, n) -> dict:
     current_m, current_x, current_y = len(current_vms), len(current_groups), len(current_plans)
 
     if m < current_m:
-        print(f"Error: --vms {m} is less than the {current_m} VM(s) already tracked — "
-              f"this tool only scales up, it doesn't remove resources.")
-        sys.exit(1)
+        # Scale DOWN: remove the highest-numbered VMs (LIFO — last
+        # created, first removed). Sorted by the numeric suffix so the
+        # ordering is deterministic and predictable.
+        remove_count = current_m - m
+        sorted_vms = sorted(current_vms.keys(), key=lambda n: n, reverse=True)
+        vms_to_remove = sorted_vms[:remove_count]
+        new_vm_count = 0
+    else:
+        vms_to_remove = []
+        new_vm_count = m - current_m
     if x < current_x:
         print(f"Error: --groups {x} is less than the {current_x} group(s) already tracked.")
         sys.exit(1)
@@ -223,7 +230,6 @@ def compute_delta(cfg: dict, manifest: dict, m: int, x: int, y: int, n) -> dict:
         print(f"Error: --plans {y} is less than the {current_y} plan(s) already tracked.")
         sys.exit(1)
 
-    new_vm_count = m - current_m
     new_group_count = x - current_x
     new_plan_count = y - current_y
 
@@ -255,10 +261,13 @@ def compute_delta(cfg: dict, manifest: dict, m: int, x: int, y: int, n) -> dict:
     # a prior --keep-vms cleanup, all need a group — least-loaded across
     # the full (existing + new) group list.
     all_group_names = list(current_groups.keys()) + new_group_names
-    unassigned_existing_vms = [name for name, v in current_vms.items() if v.get("group") is None]
+    remove_set = set(vms_to_remove)
+    unassigned_existing_vms = [name for name, v in current_vms.items()
+                                if v.get("group") is None and name not in remove_set]
     vms_needing_group = unassigned_existing_vms + new_vm_names
     group_loads = Counter(v["group"] for v in current_vms.values() if v.get("group"))
-    vm_group_assignment = least_loaded_assign(vms_needing_group, all_group_names, group_loads)
+    vm_group_assignment = (least_loaded_assign(vms_needing_group, all_group_names, group_loads)
+                            if all_group_names and vms_needing_group else {})
 
     # Plan assignment: new groups, PLUS any existing groups left
     # unassigned by a prior --keep-groups cleanup, all need a plan.
@@ -266,10 +275,12 @@ def compute_delta(cfg: dict, manifest: dict, m: int, x: int, y: int, n) -> dict:
     unassigned_existing_groups = [name for name, g in current_groups.items() if g.get("plan") is None]
     groups_needing_plan = unassigned_existing_groups + new_group_names
     plan_loads = Counter(g["plan"] for g in current_groups.values() if g.get("plan"))
-    group_plan_assignment = least_loaded_assign(groups_needing_plan, all_plan_names, plan_loads)
+    group_plan_assignment = (least_loaded_assign(groups_needing_plan, all_plan_names, plan_loads)
+                              if all_plan_names and groups_needing_plan else {})
 
     return {
         "ds_names": ds_names,
+        "vms_to_remove": vms_to_remove,
         "new_vm_names": new_vm_names, "new_group_names": new_group_names, "new_plan_names": new_plan_names,
         "new_vm_template": new_vm_template, "new_vm_datastore": new_vm_datastore,
         "vm_group_assignment": vm_group_assignment,      # vm name -> group name, for VMs needing (re)assignment
@@ -281,14 +292,18 @@ def compute_delta(cfg: dict, manifest: dict, m: int, x: int, y: int, n) -> dict:
 def final_counts(manifest: dict, delta: dict) -> dict:
     """What the manifest's distribution will look like AFTER applying
     this delta — used by both the real run's summary and --dry-run."""
-    ds_counts = Counter(v["datastore"] for v in manifest["vms"].values())
-    for name, ds in delta["new_vm_datastore"].items():
-        ds_counts[ds] += 1
+    remove_set = set(delta.get("vms_to_remove", []))
 
+    ds_counts = Counter()
     group_counts = Counter()
-    for v in manifest["vms"].values():
+    for name, v in manifest["vms"].items():
+        if name in remove_set:
+            continue
+        ds_counts[v["datastore"]] += 1
         if v.get("group"):
             group_counts[v["group"]] += 1
+    for name, ds in delta["new_vm_datastore"].items():
+        ds_counts[ds] += 1
     for vm_name, grp in delta["vm_group_assignment"].items():
         group_counts[grp] += 1
 
@@ -312,9 +327,15 @@ def print_dry_run(manifest: dict, delta: dict):
     print(f"\n  Currently tracked: {len(manifest['vms'])} VM(s), "
           f"{len(manifest['datastore_names'])} datastore(s), "
           f"{len(manifest['groups'])} group(s), {len(manifest['plans'])} plan(s)")
-    print(f"  Will add: {len(delta['new_vm_names'])} VM(s), "
-          f"{len(delta['ds_names']) - len(manifest['datastore_names'])} datastore(s), "
-          f"{len(delta['new_group_names'])} group(s), {len(delta['new_plan_names'])} plan(s)")
+
+    if delta["vms_to_remove"]:
+        print(f"  Will REMOVE: {len(delta['vms_to_remove'])} VM(s)")
+        print(f"    {', '.join(delta['vms_to_remove'])}")
+
+    if delta["new_vm_names"] or delta["new_group_names"] or delta["new_plan_names"]:
+        print(f"  Will add: {len(delta['new_vm_names'])} VM(s), "
+              f"{len(delta['ds_names']) - len(manifest['datastore_names'])} datastore(s), "
+              f"{len(delta['new_group_names'])} group(s), {len(delta['new_plan_names'])} plan(s)")
 
     if delta["new_vm_names"]:
         print(f"\n  New VM names: {', '.join(delta['new_vm_names'])}")
@@ -364,8 +385,9 @@ def run_scale_test(cfg: dict, m: int, n, x: int, y: int, dry_run: bool):
         print_dry_run(manifest, delta)
         return
 
-    if not (delta["new_vm_names"] or delta["new_group_names"] or delta["new_plan_names"]
-            or delta["vm_group_assignment"] or delta["group_plan_assignment"]):
+    if not (delta["vms_to_remove"] or delta["new_vm_names"] or delta["new_group_names"]
+            or delta["new_plan_names"] or delta["vm_group_assignment"]
+            or delta["group_plan_assignment"]):
         print("\nNothing to do — already at (or beyond) the requested totals.")
         return
 
@@ -377,6 +399,36 @@ def run_scale_test(cfg: dict, m: int, n, x: int, y: int, dry_run: bool):
     manifest["target_site"] = cfg["target_site"]
     manifest["profile"] = cfg["profile"]
     manifest["datastore_names"] = delta["ds_names"]
+
+    # 0. Remove excess VMs (scale-down) — unenroll from groups first,
+    #    then delete from vCenter, then remove from the manifest.
+    vms_to_remove = delta["vms_to_remove"]
+    if vms_to_remove:
+        print(f"\n-> Scaling down: removing {len(vms_to_remove)} VM(s)...")
+
+        # Group the VMs being removed by their current group assignment
+        # so we can unenroll in bulk per group.
+        by_group = {}
+        for vm_name in vms_to_remove:
+            grp = manifest["vms"].get(vm_name, {}).get("group")
+            if grp:
+                by_group.setdefault(grp, []).append(vm_name)
+
+        if by_group:
+            print(f"   Unenrolling from {len(by_group)} group(s)...")
+            for grp, vms in by_group.items():
+                try:
+                    e.vm.remove(*vms, with_group=grp)
+                except Exception:
+                    pass  # best-effort — VM may already be unenrolled
+
+        print(f"   Deleting {len(vms_to_remove)} VM(s) from vCenter...")
+        for name in vms_to_remove:
+            site.delete_vm(name)
+            manifest["vms"].pop(name, None)
+
+        save_manifest(manifest)
+        print(f"   {len(manifest['vms'])} VM(s) remaining.")
 
     # 1. Create only the NEW VMs — skip any that already exist in vCenter
     #    (idempotent: safe to re-run after a partial failure).
@@ -400,7 +452,22 @@ def run_scale_test(cfg: dict, m: int, n, x: int, y: int, dry_run: bool):
     new_group_names = delta["new_group_names"]
     if new_group_names:
         print(f"\n-> Creating {len(new_group_names)} new group(s)...")
+        # Check which "new" groups already exist in the API (same
+        # idempotency pattern as VMs and plans)
+        existing_groups_in_api = set()
+        try:
+            matched, _ = e.group._resolve(new_group_names)
+            existing_groups_in_api = {g.get("name") for g in matched}
+            if existing_groups_in_api:
+                print(f"   {len(existing_groups_in_api)} group(s) already exist in Pure1 — "
+                      f"skipping creation for those.")
+        except Exception:
+            pass
+
         for name in new_group_names:
+            if name in existing_groups_in_api:
+                manifest["groups"][name] = {"plan": None}
+                continue
             try:
                 e.group.create(name=name, with_policy=cfg["service_level_policy"],
                                 source_site=cfg["source_site"], target_site=cfg["target_site"])
@@ -410,12 +477,48 @@ def run_scale_test(cfg: dict, m: int, n, x: int, y: int, dry_run: bool):
 
     save_manifest(manifest)  # save before the sync wait / enrollment, in case those fail
 
-    # 3. Wait for newly created VMs to sync into inventory before
-    #    enrolling — vm.add() resolves names against the site's VM
-    #    inventory, which may not immediately reflect VMs just created.
-    if new_vm_names:
-        print(f"\n-> Waiting {cfg['sync_wait_seconds']}s for newly created VMs to sync into inventory...")
-        time.sleep(cfg["sync_wait_seconds"])
+    # 3. Wait for newly created VMs to sync into Pure1's inventory
+    #    before enrolling — vm.add() resolves names against the
+    #    inventory, which may not immediately reflect VMs just created
+    #    in vCenter. Rather than sleeping for a fixed duration and
+    #    hoping, poll the inventory until every expected VM actually
+    #    appears (or give up after max_sync_polls * sync_poll_interval).
+    all_expected_vms = list(manifest["vms"].keys())
+    if new_vm_names and all_expected_vms:
+        max_sync_polls = cfg.get("max_sync_polls", 30)
+        sync_poll_interval = cfg.get("sync_poll_interval", 30)
+        print(f"\n-> Waiting for {len(all_expected_vms)} VM(s) to appear in Pure1 inventory "
+              f"(polling every {sync_poll_interval}s, up to {max_sync_polls} attempts)...")
+
+        source_site_id = None
+        try:
+            source_site_id = e.vm._resolve_site_id(cfg["source_site"])
+        except Exception:
+            pass
+
+        if source_site_id:
+            for attempt in range(1, max_sync_polls + 1):
+                inventory = e.vm._inventory(source_site_id)
+                inventory_names = {v.get("name") for v in inventory}
+                missing = [n for n in all_expected_vms if n not in inventory_names]
+                if not missing:
+                    print(f"   All {len(all_expected_vms)} VM(s) visible in inventory "
+                          f"(after {attempt} poll(s)).")
+                    break
+                print(f"   Poll {attempt}/{max_sync_polls}: "
+                      f"{len(all_expected_vms) - len(missing)}/{len(all_expected_vms)} "
+                      f"visible, {len(missing)} still syncing...")
+                if attempt < max_sync_polls:
+                    time.sleep(sync_poll_interval)
+            else:
+                print(f"   Warning: {len(missing)} VM(s) still not visible after "
+                      f"{max_sync_polls} polls — proceeding anyway, but enrollment "
+                      f"may report some VMs as 'not found'. Missing: "
+                      f"{', '.join(missing[:10])}{'...' if len(missing) > 10 else ''}")
+        else:
+            print(f"   Could not resolve site ID for '{cfg['source_site']}' — "
+                  f"falling back to fixed {cfg['sync_wait_seconds']}s wait.")
+            time.sleep(cfg["sync_wait_seconds"])
 
     # 4. Enroll every VM that needs a group (new ones, plus any orphaned
     #    by a prior --keep-vms cleanup) into its assigned group.
@@ -434,6 +537,12 @@ def run_scale_test(cfg: dict, m: int, n, x: int, y: int, dry_run: bool):
     # 5. Create NEW plans directly with their assigned groups already
     #    attached, and attach any orphaned groups (from a prior
     #    --keep-groups cleanup) or newly-grown groups to existing plans.
+    #
+    #    Before creating, check which "new" plan names already exist in
+    #    the API (e.g. from a prior run whose manifest was wiped, or
+    #    manual creation) — for those, fall back to plan.add() instead
+    #    of plan.create(), which would fail on the duplicate name and
+    #    silently drop their assigned groups on the floor.
     group_plan_assignment = delta["group_plan_assignment"]
     new_plan_names = delta["new_plan_names"]
     if group_plan_assignment:
@@ -442,9 +551,21 @@ def run_scale_test(cfg: dict, m: int, n, x: int, y: int, dry_run: bool):
         for grp_name, pl in group_plan_assignment.items():
             by_plan.setdefault(pl, []).append(grp_name)
 
+        # Check which "new" plan names already exist in Pure1
+        already_exist_in_api = set()
+        if new_plan_names:
+            try:
+                matched, _ = e.plan._resolve(new_plan_names)
+                already_exist_in_api = {p.get("name") for p in matched}
+                if already_exist_in_api:
+                    print(f"   Note: {', '.join(already_exist_in_api)} already exist in Pure1 "
+                          f"— will add groups to them instead of re-creating.")
+            except Exception:
+                pass  # if the check itself fails, proceed with create and let it fail naturally
+
         for plan_name in new_group_plan_order(new_plan_names, by_plan):
             groups_for_plan = by_plan.get(plan_name, [])
-            if plan_name in new_plan_names:
+            if plan_name in new_plan_names and plan_name not in already_exist_in_api:
                 try:
                     e.plan.create(name=plan_name, with_groups=groups_for_plan,
                                    target_site=cfg["target_site"])
@@ -452,12 +573,27 @@ def run_scale_test(cfg: dict, m: int, n, x: int, y: int, dry_run: bool):
                     for g in groups_for_plan:
                         manifest["groups"][g]["plan"] = plan_name
                 except Exception as exc:
-                    print(f"   {plan_name}: FAILED ({exc})")
+                    print(f"   {plan_name}: create FAILED ({exc}), trying plan.add() as fallback...")
+                    try:
+                        e.plan.add(plan_name, groups_for_plan)
+                        if plan_name not in manifest["plans"]:
+                            manifest["plans"].append(plan_name)
+                        for g in groups_for_plan:
+                            manifest["groups"][g]["plan"] = plan_name
+                    except Exception as exc2:
+                        print(f"   {plan_name}: add also FAILED ({exc2}) — "
+                              f"groups {', '.join(groups_for_plan)} are unassigned.")
             else:
-                # existing plan gaining more groups
-                e.plan.add(plan_name, groups_for_plan)
-                for g in groups_for_plan:
-                    manifest["groups"][g]["plan"] = plan_name
+                # existing plan (either was already in manifest, or just
+                # discovered to already exist in the API) gaining groups
+                try:
+                    e.plan.add(plan_name, groups_for_plan)
+                    if plan_name not in manifest["plans"]:
+                        manifest["plans"].append(plan_name)
+                    for g in groups_for_plan:
+                        manifest["groups"][g]["plan"] = plan_name
+                except Exception as exc:
+                    print(f"   {plan_name}: FAILED to add groups ({exc})")
 
     save_manifest(manifest)
 
@@ -511,8 +647,8 @@ def run_protection_and_failover(e, manifest: dict):
     print(f"  VMs per datastore: {dict(counts['ds_counts'])}")
     print(f"  VMs per group:     {dict(counts['group_counts'])}")
     print(f"  Groups per plan:   {dict(counts['plan_counts'])}")
-    print(f"  Protection time:   {protection_time_minutes}min")
-    print(f"  Recovery time:     {recovery_time_minutes}min")
+    print(f"  Protection time:   {f'{protection_time_minutes}min' if protection_time_minutes is not None else '-'}")
+    print(f"  Recovery time:     {f'{recovery_time_minutes}min' if recovery_time_minutes is not None else '-'}")
     print(f"\n  Run 'ers-scale-test --cleanup' to tear all of this down.")
 
 
@@ -615,12 +751,18 @@ def run_cleanup(cfg: dict, keep_vms: bool, keep_groups: bool, keep_plans: bool):
 
     if group_names:
         print(f"\n-> Unenrolling VMs from {len(group_names)} group(s)...")
+        vms_by_group = {}
+        for vm_name, v in manifest["vms"].items():
+            grp = v.get("group")
+            if grp:
+                vms_by_group.setdefault(grp, []).append(vm_name)
         for group_name in group_names:
-            if vm_names:
+            group_vms = vms_by_group.get(group_name, [])
+            if group_vms:
                 try:
-                    e.vm.remove(*vm_names, with_group=group_name)
+                    e.vm.remove(*group_vms, with_group=group_name)
                 except Exception:
-                    pass  # best-effort — not every VM is necessarily in every group
+                    pass  # best-effort
         print(f"-> Deleting {len(group_names)} group(s)...")
         e.group.delete(*group_names)
 
@@ -716,7 +858,7 @@ def main():
 
     has_datastore_names = bool(cfg.get("datastore_names"))
 
-    required_flags = [("--vms", args.vms), ("--groups", args.groups), ("--plans", args.plans)]
+    required_flags = [("--vms", args.vms)]
     if not has_datastore_names:
         required_flags.append(("--datastores", args.datastores))
     missing = [flag for flag, val in required_flags if val is None]
@@ -733,11 +875,17 @@ def main():
     else:
         n = args.datastores
 
-    if any(v < 1 for v in (args.vms, n, args.groups, args.plans)):
-        print("Error: --vms/--datastores/--groups/--plans must all be at least 1")
+    x = args.groups if args.groups is not None else 0
+    y = args.plans if args.plans is not None else 0
+
+    if args.vms < 1 or n < 1:
+        print("Error: --vms and --datastores must be at least 1")
+        sys.exit(1)
+    if y > 0 and x < 1:
+        print("Error: --plans requires at least --groups 1 (plans need groups)")
         sys.exit(1)
 
-    run_scale_test(cfg, args.vms, n, args.groups, args.plans, args.dry_run)
+    run_scale_test(cfg, args.vms, n, x, y, args.dry_run)
 
 
 if __name__ == "__main__":
