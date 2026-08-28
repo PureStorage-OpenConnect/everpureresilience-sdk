@@ -245,14 +245,22 @@ def compute_delta(cfg: dict, manifest: dict, m: int, x: int, y: int, n) -> dict:
     current_m, current_x, current_y = len(current_vms), len(current_groups), len(current_plans)
 
     if m < current_m:
-        # Scale DOWN: remove the highest-numbered VMs (LIFO — last
-        # created, first removed). Sorted by the numeric suffix so the
-        # ordering is deterministic and predictable.
-        remove_count = current_m - m
+        # Scale DOWN — behavior depends on whether groups exist:
+        #   groups > 0: just unenroll the excess VMs (leave in vCenter)
+        #   groups = 0: actually delete VMs from vCenter
+        # A VM should never be deleted while still enrolled in a group.
+        excess_count = current_m - m
         sorted_vms = sorted(current_vms.keys(), key=lambda n: n, reverse=True)
-        vms_to_remove = sorted_vms[:remove_count]
+        excess_vms = sorted_vms[:excess_count]
+        if current_x > 0:
+            vms_to_unenroll = excess_vms
+            vms_to_remove = []
+        else:
+            vms_to_unenroll = []
+            vms_to_remove = excess_vms
         new_vm_count = 0
     else:
+        vms_to_unenroll = []
         vms_to_remove = []
         new_vm_count = m - current_m
     if x < current_x:
@@ -293,7 +301,7 @@ def compute_delta(cfg: dict, manifest: dict, m: int, x: int, y: int, n) -> dict:
     # a prior --keep-vms cleanup, all need a group — least-loaded across
     # the full (existing + new) group list.
     all_group_names = list(current_groups.keys()) + new_group_names
-    remove_set = set(vms_to_remove)
+    remove_set = set(vms_to_remove) | set(vms_to_unenroll)
     unassigned_existing_vms = [name for name, v in current_vms.items()
                                 if v.get("group") is None and name not in remove_set]
     vms_needing_group = unassigned_existing_vms + new_vm_names
@@ -313,6 +321,7 @@ def compute_delta(cfg: dict, manifest: dict, m: int, x: int, y: int, n) -> dict:
     return {
         "ds_names": ds_names,
         "vms_to_remove": vms_to_remove,
+        "vms_to_unenroll": vms_to_unenroll,
         "new_vm_names": new_vm_names, "new_group_names": new_group_names, "new_plan_names": new_plan_names,
         "new_vm_template": new_vm_template, "new_vm_datastore": new_vm_datastore,
         "vm_group_assignment": vm_group_assignment,      # vm name -> group name, for VMs needing (re)assignment
@@ -325,14 +334,16 @@ def final_counts(manifest: dict, delta: dict) -> dict:
     """What the manifest's distribution will look like AFTER applying
     this delta — used by both the real run's summary and --dry-run."""
     remove_set = set(delta.get("vms_to_remove", []))
+    unenroll_set = set(delta.get("vms_to_unenroll", []))
+    skip_set = remove_set | unenroll_set
 
     ds_counts = Counter()
     group_counts = Counter()
     for name, v in manifest["vms"].items():
         if name in remove_set:
-            continue
+            continue  # deleted from vCenter entirely
         ds_counts[v["datastore"]] += 1
-        if v.get("group"):
+        if v.get("group") and name not in unenroll_set:
             group_counts[v["group"]] += 1
     for name, ds in delta["new_vm_datastore"].items():
         ds_counts[ds] += 1
@@ -360,8 +371,12 @@ def print_dry_run(manifest: dict, delta: dict):
           f"{len(manifest['datastore_names'])} datastore(s), "
           f"{len(manifest['groups'])} group(s), {len(manifest['plans'])} plan(s)")
 
+    if delta["vms_to_unenroll"]:
+        print(f"  Will UNENROLL (keep in vCenter): {len(delta['vms_to_unenroll'])} VM(s)")
+        print(f"    {', '.join(delta['vms_to_unenroll'])}")
+
     if delta["vms_to_remove"]:
-        print(f"  Will REMOVE: {len(delta['vms_to_remove'])} VM(s)")
+        print(f"  Will DELETE from vCenter: {len(delta['vms_to_remove'])} VM(s)")
         print(f"    {', '.join(delta['vms_to_remove'])}")
 
     if delta["new_vm_names"] or delta["new_group_names"] or delta["new_plan_names"]:
@@ -417,7 +432,8 @@ def run_scale_test(cfg: dict, m: int, n, x: int, y: int, dry_run: bool):
         print_dry_run(manifest, delta)
         return
 
-    if not (delta["vms_to_remove"] or delta["new_vm_names"] or delta["new_group_names"]
+    if not (delta["vms_to_remove"] or delta["vms_to_unenroll"]
+            or delta["new_vm_names"] or delta["new_group_names"]
             or delta["new_plan_names"] or delta["vm_group_assignment"]
             or delta["group_plan_assignment"]):
         print("\nNothing to do — already at (or beyond) the requested totals.")
@@ -434,31 +450,38 @@ def run_scale_test(cfg: dict, m: int, n, x: int, y: int, dry_run: bool):
 
     # 0. Remove excess VMs (scale-down) — unenroll from groups first,
     #    then delete from vCenter, then remove from the manifest.
-    vms_to_remove = delta["vms_to_remove"]
-    if vms_to_remove:
-        print(f"\n-> Scaling down: removing {len(vms_to_remove)} VM(s)...")
-
-        # Group the VMs being removed by their current group assignment
-        # so we can unenroll in bulk per group.
+    # 0a. Unenroll-only scale-down (groups exist — keep VMs in vCenter,
+    #     just remove them from their groups).
+    vms_to_unenroll = delta["vms_to_unenroll"]
+    if vms_to_unenroll:
+        print(f"\n-> Scaling down enrollment: unenrolling {len(vms_to_unenroll)} VM(s) "
+              f"(keeping in vCenter)...")
         by_group = {}
-        for vm_name in vms_to_remove:
+        for vm_name in vms_to_unenroll:
             grp = manifest["vms"].get(vm_name, {}).get("group")
             if grp:
                 by_group.setdefault(grp, []).append(vm_name)
+        for grp, vms in by_group.items():
+            try:
+                e.vm.remove(*vms, with_group=grp)
+            except Exception:
+                pass
+        for vm_name in vms_to_unenroll:
+            if vm_name in manifest["vms"]:
+                manifest["vms"][vm_name]["group"] = None
+        save_manifest(manifest)
+        enrolled_count = sum(1 for v in manifest["vms"].values() if v.get("group"))
+        print(f"   {enrolled_count} VM(s) still enrolled, "
+              f"{len(manifest['vms'])} total in vCenter.")
 
-        if by_group:
-            print(f"   Unenrolling from {len(by_group)} group(s)...")
-            for grp, vms in by_group.items():
-                try:
-                    e.vm.remove(*vms, with_group=grp)
-                except Exception:
-                    pass  # best-effort — VM may already be unenrolled
-
-        print(f"   Deleting {len(vms_to_remove)} VM(s) from vCenter...")
+    # 0b. Full delete scale-down (no groups — actually remove VMs from
+    #     vCenter since nothing references them).
+    vms_to_remove = delta["vms_to_remove"]
+    if vms_to_remove:
+        print(f"\n-> Scaling down: deleting {len(vms_to_remove)} VM(s) from vCenter...")
         for name in vms_to_remove:
             site.delete_vm(name)
             manifest["vms"].pop(name, None)
-
         save_manifest(manifest)
         print(f"   {len(manifest['vms'])} VM(s) remaining.")
 
@@ -970,26 +993,32 @@ def main():
         sys.exit(1)
 
     has_datastore_names = bool(cfg.get("datastore_names"))
+    manifest = load_manifest()
+    current_ds_count = len(manifest.get("datastore_names", []))
 
-    required_flags = [("--vms", args.vms)]
-    if not has_datastore_names:
-        required_flags.append(("--datastores", args.datastores))
-    missing = [flag for flag, val in required_flags if val is None]
-    if missing:
-        print(f"Error: {', '.join(missing)} are required (unless using --cleanup)")
+    if args.vms is None:
+        print("Error: --vms is required (unless using --cleanup)")
         sys.exit(1)
 
+    # Resolve datastores: config's datastore_names > explicit --datastores > manifest
     n = None
     if has_datastore_names:
         n = len(cfg["datastore_names"])
         if args.datastores is not None and args.datastores != n:
             print(f"Note: --datastores {args.datastores} ignored — config's datastore_names "
                   f"({n} entries: {', '.join(cfg['datastore_names'])}) takes precedence.")
-    else:
+    elif args.datastores is not None:
         n = args.datastores
+    elif current_ds_count > 0:
+        n = current_ds_count
+    else:
+        print("Error: --datastores is required on the first run (no prior state in manifest)")
+        sys.exit(1)
 
-    x = args.groups if args.groups is not None else 0
-    y = args.plans if args.plans is not None else 0
+    current_groups = len(manifest.get("groups", {}))
+    current_plans = len(manifest.get("plans", []))
+    x = args.groups if args.groups is not None else current_groups
+    y = args.plans if args.plans is not None else current_plans
 
     if args.vms < 1 or n < 1:
         print("Error: --vms and --datastores must be at least 1")

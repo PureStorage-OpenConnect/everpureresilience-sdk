@@ -791,13 +791,17 @@ class VSphereSite(Site):
 
     def _clone_from_template(self, names: list, template: str, resource_pool: str,
                               datastore: str, network: str, folder: str, power_on: bool):
-        # Templates are just VirtualMachine objects (config.template=True) —
-        # reuse the same PropertyCollector-based lookup power_on/off/delete
-        # already use, rather than the less-efficient CreateContainerView
-        # scan _find_in_inventory does. One targeted server round trip
-        # instead of enumerating every VM in the inventory.
+        # Try PropertyCollector first (efficient, one targeted round
+        # trip) — but vCenter templates (config.template=True) aren't
+        # always reachable via the host→vm traversal path the
+        # PropertyCollector uses, since templates are folder-only
+        # objects not assigned to a host. Fall back to ContainerView
+        # (scans the whole inventory, but finds everything including
+        # templates in nested folders) if PropertyCollector misses it.
         template_map = self._get_vms_by_names([template])
         template_vm = template_map.get(template)
+        if not template_vm:
+            template_vm = self._find_in_inventory(vim.VirtualMachine, template)
         if not template_vm:
             print(f"Error: template '{template}' not found")
             return []
