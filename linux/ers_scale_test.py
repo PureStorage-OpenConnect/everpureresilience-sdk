@@ -448,9 +448,74 @@ def run_scale_test(cfg: dict, m: int, n, x: int, y: int, dry_run: bool):
     manifest["profile"] = cfg["profile"]
     manifest["datastore_names"] = delta["ds_names"]
 
-    # 0. Remove excess VMs (scale-down) — unenroll from groups first,
+    # 1. Sync actual state from Pure1 BEFORE any scale-down/creation
+    #    steps — if the manifest is stale (from a prior run or manual
+    #    changes), acting on it without syncing first causes wrong
+    #    unenrollments, duplicate enrollments (422s), etc.
+
+    # 1a. Sync enrollment state
+    if manifest["groups"]:
+        print(f"\n-> Syncing actual enrollment state from Pure1...")
+        enrollment_changed = False
+        for grp_name in list(manifest["groups"].keys()):
+            try:
+                matched, _ = e.group._resolve([grp_name])
+                if not matched:
+                    continue
+                grp_id = matched[0]["id"]
+                enrolled_names = _fetch_all_enrolled_names(e, grp_id)
+                for vm_name in enrolled_names:
+                    if vm_name in manifest["vms"]:
+                        if manifest["vms"][vm_name].get("group") != grp_name:
+                            manifest["vms"][vm_name]["group"] = grp_name
+                            enrollment_changed = True
+                # Also mark VMs that the manifest thinks are in this group
+                # but Pure1 says are NOT — set them to None so they don't
+                # block unenrollment or get incorrectly counted.
+                for vm_name, v in manifest["vms"].items():
+                    if v.get("group") == grp_name and vm_name not in enrolled_names:
+                        manifest["vms"][vm_name]["group"] = None
+                        enrollment_changed = True
+            except Exception:
+                pass
+        if enrollment_changed:
+            save_manifest(manifest)
+            delta = compute_delta(cfg, manifest, m, x, y, n)
+            print(f"   Enrollment state synced — recomputed assignments.")
+        else:
+            print(f"   Manifest already consistent with Pure1.")
+
+    # 1b. Sync plan memberships
+    if manifest["plans"]:
+        print(f"-> Syncing actual plan membership state from Pure1...")
+        plan_changed = False
+        try:
+            group_id_to_name = {}
+            all_group_matched, _ = e.group._resolve(list(manifest["groups"].keys()))
+            for g in all_group_matched:
+                group_id_to_name[g["id"]] = g["name"]
+
+            plan_matched, _ = e.plan._resolve(list(manifest["plans"]))
+            for plan_obj in plan_matched:
+                plan_name = plan_obj.get("name")
+                for pg in (plan_obj.get("groups") or []):
+                    pg_name = group_id_to_name.get(pg.get("id"))
+                    if pg_name and pg_name in manifest["groups"]:
+                        if manifest["groups"][pg_name].get("plan") != plan_name:
+                            manifest["groups"][pg_name]["plan"] = plan_name
+                            plan_changed = True
+        except Exception:
+            pass
+        if plan_changed:
+            save_manifest(manifest)
+            delta = compute_delta(cfg, manifest, m, x, y, n)
+            print(f"   Plan membership synced — recomputed assignments.")
+        else:
+            print(f"   Manifest already consistent with Pure1.")
+
+    # 2. Scale down VMs if needed — unenroll from groups first,
     #    then delete from vCenter, then remove from the manifest.
-    # 0a. Unenroll-only scale-down (groups exist — keep VMs in vCenter,
+    # 2a. Unenroll-only scale-down (groups exist — keep VMs in vCenter,
     #     just remove them from their groups).
     vms_to_unenroll = delta["vms_to_unenroll"]
     if vms_to_unenroll:
@@ -474,7 +539,7 @@ def run_scale_test(cfg: dict, m: int, n, x: int, y: int, dry_run: bool):
         print(f"   {enrolled_count} VM(s) still enrolled, "
               f"{len(manifest['vms'])} total in vCenter.")
 
-    # 0b. Full delete scale-down (no groups — actually remove VMs from
+    # 2b. Full delete scale-down (no groups — actually remove VMs from
     #     vCenter since nothing references them).
     vms_to_remove = delta["vms_to_remove"]
     if vms_to_remove:
@@ -485,7 +550,7 @@ def run_scale_test(cfg: dict, m: int, n, x: int, y: int, dry_run: bool):
         save_manifest(manifest)
         print(f"   {len(manifest['vms'])} VM(s) remaining.")
 
-    # 1. Create only the NEW VMs — skip any that already exist in vCenter
+    # 3. Create only the NEW VMs — skip any that already exist in vCenter
     #    (idempotent: safe to re-run after a partial failure).
     new_vm_names = delta["new_vm_names"]
     if new_vm_names:
@@ -503,7 +568,7 @@ def run_scale_test(cfg: dict, m: int, n, x: int, y: int, dry_run: bool):
                                       "template": delta["new_vm_template"][name], "group": None}
         print(f"   {len(manifest['vms'])} VM(s) tracked in total.")
 
-    # 2. Create only the NEW groups.
+    # 4. Create only the NEW groups.
     new_group_names = delta["new_group_names"]
     if new_group_names:
         print(f"\n-> Creating {len(new_group_names)} new group(s)...")
@@ -532,7 +597,7 @@ def run_scale_test(cfg: dict, m: int, n, x: int, y: int, dry_run: bool):
 
     save_manifest(manifest)  # save before the sync wait / enrollment, in case those fail
 
-    # 3. Wait for newly created VMs to sync into Pure1's inventory
+    # 5. Wait for newly created VMs to sync into Pure1's inventory
     #    before enrolling — vm.add() resolves names against the
     #    inventory, which may not immediately reflect VMs just created
     #    in vCenter. Rather than sleeping for a fixed duration and
@@ -575,66 +640,6 @@ def run_scale_test(cfg: dict, m: int, n, x: int, y: int, dry_run: bool):
                   f"falling back to fixed {cfg['sync_wait_seconds']}s wait.")
             time.sleep(cfg["sync_wait_seconds"])
 
-    # 4. Sync actual enrollment state from Pure1 — if VMs are already
-    #    enrolled in groups (from a prior run whose manifest was
-    #    wiped/stale), record that in the manifest BEFORE computing
-    #    who needs enrollment. Without this, the tool would try to
-    #    re-enroll VMs into different groups than where they already
-    #    are, getting 422s because a VM can only be in one group.
-    if manifest["groups"]:
-        print(f"\n-> Syncing actual enrollment state from Pure1...")
-        enrollment_changed = False
-        for grp_name in list(manifest["groups"].keys()):
-            try:
-                matched, _ = e.group._resolve([grp_name])
-                if not matched:
-                    continue
-                grp_id = matched[0]["id"]
-                enrolled_names = _fetch_all_enrolled_names(e, grp_id)
-                for vm_name in enrolled_names:
-                    if vm_name in manifest["vms"] and manifest["vms"][vm_name].get("group") != grp_name:
-                        manifest["vms"][vm_name]["group"] = grp_name
-                        enrollment_changed = True
-            except Exception:
-                pass
-        if enrollment_changed:
-            save_manifest(manifest)
-            delta = compute_delta(cfg, manifest, m, x, y, n)
-            print(f"   Enrollment state synced — recomputed assignments.")
-        else:
-            print(f"   Manifest already consistent with Pure1.")
-
-    # 4b. Same sync for plan memberships — if groups are already in plans
-    #     from a prior run, honor those rather than redistributing (a
-    #     group can only be in one plan, and plans run in parallel).
-    if manifest["plans"]:
-        print(f"-> Syncing actual plan membership state from Pure1...")
-        plan_changed = False
-        try:
-            # Build group ID->name map once for reverse-lookup (the plan
-            # endpoint returns group references with name: "N/A")
-            group_id_to_name = {}
-            all_group_matched, _ = e.group._resolve(list(manifest["groups"].keys()))
-            for g in all_group_matched:
-                group_id_to_name[g["id"]] = g["name"]
-
-            plan_matched, _ = e.plan._resolve(list(manifest["plans"]))
-            for plan_obj in plan_matched:
-                plan_name = plan_obj.get("name")
-                for pg in (plan_obj.get("groups") or []):
-                    pg_name = group_id_to_name.get(pg.get("id"))
-                    if pg_name and pg_name in manifest["groups"]:
-                        if manifest["groups"][pg_name].get("plan") != plan_name:
-                            manifest["groups"][pg_name]["plan"] = plan_name
-                            plan_changed = True
-        except Exception:
-            pass
-        if plan_changed:
-            save_manifest(manifest)
-            delta = compute_delta(cfg, manifest, m, x, y, n)
-            print(f"   Plan membership synced — recomputed assignments.")
-        else:
-            print(f"   Manifest already consistent with Pure1.")
 
     # 5. Enroll every VM that needs a group (new ones, plus any orphaned
     #    by a prior --keep-vms cleanup) into its assigned group.

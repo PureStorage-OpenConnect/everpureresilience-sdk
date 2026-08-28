@@ -184,19 +184,12 @@ class VmResource:
 
         Confirmed from real API output:
           - GET /enrolled-virtual-machines takes application_group_ids
-            (PLURAL) plus offset/limit/deployment_id/search — this is a
-            server-side search, not exact matching, so results are
-            filtered client-side afterward to the exact names/wildcard
-            pattern actually requested.
+            (PLURAL) plus offset/limit/deployment_id — for exact-name
+            mode, uses names= (comma-separated); for wildcard mode,
+            uses search= (substring match with '*' stripped).
           - DELETE /enrolled-virtual-machines takes application_group_id
             (SINGULAR) plus ids — note this is genuinely a different
             param name than the GET's, not a typo to "fix".
-
-        search is a comma-joined list of names for exact-name mode, or
-        the wildcard pattern with '*' stripped for wildcard mode (the
-        server does its own substring-style matching either way — the
-        real "did this exactly match" decision still happens client-side
-        via _enrolled_name()).
         """
         ers = self._ers
         group = self._resolve_group(with_group)
@@ -207,19 +200,19 @@ class VmResource:
                 raise ValueError(f"with_wildcard expects exactly one pattern, "
                                   f"got {len(names)}: {names!r}")
             pattern = names[0]
-            search_term = pattern.replace("*", "")
+            filter_params = {"search": pattern.replace("*", "")}
         else:
             pattern = None
-            search_term = ",".join(n.strip() for n in names)
+            filter_params = {"names": ",".join(n.strip() for n in names)}
 
         all_results = []
         offset = 0
         total = None
         while True:
-            data = ers.api.get(ENROLLED_VMS_PATH, params={
-                "offset": offset, "limit": 300, "deployment_id": ers.deployment_id,
-                "application_group_ids": group_id, "search": search_term,
-            })
+            params = {"offset": offset, "limit": 300, "deployment_id": ers.deployment_id,
+                      "application_group_ids": group_id}
+            params.update(filter_params)
+            data = ers.api.get(ENROLLED_VMS_PATH, params=params)
             items = data.get("items") or []
             all_results.extend(items)
             if total is None:
