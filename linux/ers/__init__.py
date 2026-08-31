@@ -21,6 +21,8 @@ ers — Everpure Resilience Service SDK.
 
 from .instance import ErsInstance
 
+__version__ = "2.8.0"
+
 __all__ = ["instance", "ErsInstance"]
 
 

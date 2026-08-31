@@ -125,6 +125,7 @@ def main():
         epilog=__doc__,
     )
 
+    parser.add_argument("--version", action="version", version=f"ers-cli {ers.__version__}")
     parser.add_argument("--profile", default="default",
                          help="~/.ers/config profile to use (default: 'default')")
     parser.add_argument("--limit", type=int, default=25, help="Max results (default: 25)")

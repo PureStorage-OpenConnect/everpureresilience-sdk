@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "ers-sdk"
-version = "2.7.0"
+version = "2.8.0"
 dependencies = ["PyJWT", "cryptography", "requests", "pyVmomi"]
 
 [project.optional-dependencies]

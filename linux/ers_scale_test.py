@@ -941,6 +941,7 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=__doc__,
     )
+    parser.add_argument("--version", action="version", version=f"ers-scale-test {ers.__version__}")
     parser.add_argument("--config", default=DEFAULT_CONFIG_PATH,
                          help=f"Path to config file (default: {DEFAULT_CONFIG_PATH})")
     parser.add_argument("--vms", type=int, metavar="M", help="Desired total number of VMs")
