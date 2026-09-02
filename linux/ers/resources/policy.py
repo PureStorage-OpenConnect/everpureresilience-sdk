@@ -30,12 +30,15 @@ class PolicyResource:
 
     def create(self, name: str, rpo_minutes: int, target_type: str,
                local_retention_hours: int, remote_retention_hours: int,
-               estimated_rto_hours: int = 0, description: str = ""):
+               estimated_rto_hours: int = 0, description: str = "",
+               source_type: str = "vmw"):
         """
         Create a service level policy.
 
         rpo_minutes may be 0. local/remote/estimated_rto are in hours.
-        target_type is 'vmw' or 'aws'.
+        source_type is 'vmw' (default) or 'aws' — controls the source
+        provider (ordinal 0). target_type is 'vmw' or 'aws' — controls
+        the replication target (ordinal 1).
 
         rpo, retention, and estimated_rto are all plain integer
         milliseconds on the wire — engineer-confirmed against a real
@@ -47,8 +50,12 @@ class PolicyResource:
         both).
         """
         ers = self._ers
-        site_type = self.SITE_TYPE_MAP.get(target_type.lower())
-        if not site_type:
+        src_site_type = self.SITE_TYPE_MAP.get(source_type.lower())
+        if not src_site_type:
+            raise ValueError(f"source_type must be one of {sorted(self.SITE_TYPE_MAP)}, "
+                              f"got {source_type!r}")
+        tgt_site_type = self.SITE_TYPE_MAP.get(target_type.lower())
+        if not tgt_site_type:
             raise ValueError(f"target_type must be one of {sorted(self.SITE_TYPE_MAP)}, "
                               f"got {target_type!r}")
 
@@ -58,12 +65,12 @@ class PolicyResource:
             "rpo": rpo_minutes * 60_000,  # minutes -> ms
             "replication_strategy": {
                 "ordinal": 0,
-                "site_type": site_type,
+                "site_type": src_site_type,
                 "retention": local_retention_hours * 3_600_000,  # hours -> ms
                 "replication_targets": [
                     {
                         "ordinal": 1,
-                        "site_type": site_type,
+                        "site_type": tgt_site_type,
                         "retention": remote_retention_hours * 3_600_000,  # hours -> ms
                         "estimated_rto": estimated_rto_hours * 3_600_000,  # hours -> ms
                         "replication_targets": [],

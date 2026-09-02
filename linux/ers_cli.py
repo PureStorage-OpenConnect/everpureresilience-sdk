@@ -56,9 +56,11 @@ examples:
   # Delete N VMs by name-prefix/count (same naming as --create-vm)
   ers-cli --site site1 --delete-vm --name-prefix ubuntu-tst- --count 10
 
-  --policy -- service level policies
+  --policy -- service level policies (rpo in minutes; retention and rto in hours)
   ers-cli --policy create --name policy1 --rpo 15 --target-type vmw \\
-             --local-retention 24 --remote-retention 72
+             --local-retention 24 --remote-retention 72 --estimated-rto 1
+  ers-cli --policy create --name policy1 --rpo 60 --source-type vmw --target-type aws \\
+             --local-retention 24 --remote-retention 24 --estimated-rto 1
   ers-cli --policy delete --names policy1,policy2
   ers-cli --policy delete --names "policy*"
 
@@ -153,18 +155,19 @@ def main():
     parser.add_argument("--target-site", metavar="SITE_NAME",
                          help="Target site name, used with --group create")
     parser.add_argument("--rpo", type=int, metavar="MINUTES",
-                         help="RPO in minutes (0 allowed), used with --policy create")
+                         help="RPO in minutes (0 allowed)")
     parser.add_argument("--target-type", metavar="vmw|aws",
-                         help="Replication target platform, used with --policy create")
+                         help="Replication target platform")
+    parser.add_argument("--source-type", metavar="vmw|aws", default="vmw",
+                         help="Source provider platform (default: vmw)")
     parser.add_argument("--local-retention", type=int, metavar="HOURS",
-                         help="Local snapshot retention in hours, used with --policy create")
+                         help="Local snapshot retention in hours")
     parser.add_argument("--remote-retention", type=int, metavar="HOURS",
-                         help="Remote snapshot retention in hours, used with --policy create")
-    parser.add_argument("--estimated-rto", type=int, metavar="HOURS", default=0,
-                         help="Estimated recovery time objective in hours (default: 0), "
-                              "used with --policy create")
+                         help="Remote snapshot retention in hours")
+    parser.add_argument("--estimated-rto", type=int, metavar="HOURS",
+                         help="Estimated recovery time objective in hours")
     parser.add_argument("--description", metavar="TEXT", default="",
-                         help="Optional description, used with --policy create")
+                         help="Optional description")
     parser.add_argument("--plan", metavar="ACTION",
                          help="Plan action: create, add, remove, delete, failover, cleanup, failback")
     parser.add_argument("--with-groups", metavar="G1,G2",
@@ -316,6 +319,7 @@ def main():
             missing = [flag for flag, val in [
                 ("--name", args.name), ("--rpo", args.rpo), ("--target-type", args.target_type),
                 ("--local-retention", args.local_retention), ("--remote-retention", args.remote_retention),
+                ("--estimated-rto", args.estimated_rto),
             ] if val is None]
             if missing:
                 print(f"Error: --policy create requires {', '.join(missing)}")
@@ -324,7 +328,8 @@ def main():
                              local_retention_hours=args.local_retention,
                              remote_retention_hours=args.remote_retention,
                              estimated_rto_hours=args.estimated_rto,
-                             description=args.description)
+                             description=args.description,
+                             source_type=args.source_type)
         elif action == "delete":
             if not names:
                 print("Error: --names is required with --policy delete")
