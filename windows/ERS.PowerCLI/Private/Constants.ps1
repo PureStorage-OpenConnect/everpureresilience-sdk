@@ -1,26 +1,11 @@
-# Copyright 2026 Everpure
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+# Copyright 2026 Everpure™
+# Licensed under the Apache License, Version 2.0
 
 # Private: every shared "constant" in the module, as a function rather
-# than a $script: variable. Cross-file $script: variable sharing showed
-# at least one confirmed case of failing when invoked through Pester's
-# test-execution model, despite working when queried directly against
-# the module's scope — the exact mechanism wasn't fully pinned down.
-# Functions have been reliable in every context tested (including from
-# Pester), so this sidesteps the whole class of failure rather than
-# chasing the precise cause further. Centralized here in one file so
-# every constant is defined the same, safe way.
+# than a $script: variable. Functions resolve correctly in all contexts
+# including Pester. Centralized here in one file.
+
+function Get-ErsModuleVersion { '2.8.0' }
 
 function Get-ErsDir             { Join-Path $HOME '.ers' }
 function Get-ErsConfigPath      { Join-Path (Get-ErsDir) 'config' }
@@ -32,21 +17,29 @@ function Get-ErsTerminalStates { @('SUCCEEDED', 'FAILED', 'CANCELLED', 'COMPLETE
 function Get-ErsSupportedVmListSchemaVersions { @(2) }
 
 function Get-ErsLastRunOpsFileName { 'last_run_ops.json' }
-function Get-ErsTagExportFileName  { '.last_tags_export.json' }
+function Get-ErsTagExportFileName  { 'last_tags_export.json' }
 
 function Get-ErsPlanStateFileName { 'last_plan_ops.json' }
 function Get-ErsPlanOpsFileName   { 'last_plan_run_ops.json' }
 
-function Get-ErsFailoverPath  { '/pure-protect/api/1.latest/recovery-plans/failover/operations' }
-function Get-ErsCleanupPath   { '/pure-protect/api/1.latest/recovery-plans/cleanup/operations' }
-function Get-ErsFbSyncPath    { '/pure-protect/api/1.latest/recovery-plans/failback/synchronization/operations' }
-function Get-ErsFbCutoverPath { '/pure-protect/api/1.latest/recovery-plans/failback/cutover/operations' }
-function Get-ErsFbPromotePath { '/pure-protect/api/1.latest/recovery-plans/failback/promotion/operations' }
-function Get-ErsSnapshotsPath { '/pure-protect/api/1.latest/recovery-plans/snapshot-sets' }
+# API paths
+function Get-ErsPoliciesPath    { '/pure-protect/api/1.latest/service-level-policies' }
+function Get-ErsGroupsPath      { '/pure-protect/api/1.latest/application-groups' }
+function Get-ErsProtectPath     { '/pure-protect/api/1.latest/application-groups/protection/operations' }
+function Get-ErsPlansPath       { '/pure-protect/api/1.latest/recovery-plans' }
+function Get-ErsSitesPath       { '/pure-protect/api/1.latest/sites' }
+function Get-ErsVmInventoryPath { '/pure-protect/api/1.latest/inventory/vmware/virtual-machines' }
+function Get-ErsEnrolledVmsPath { '/pure-protect/api/1.latest/enrolled-virtual-machines' }
+function Get-ErsFailoverPath    { '/pure-protect/api/1.latest/recovery-plans/failover/operations' }
+function Get-ErsCleanupPath     { '/pure-protect/api/1.latest/recovery-plans/cleanup/operations' }
+function Get-ErsFbSyncPath      { '/pure-protect/api/1.latest/recovery-plans/failback/synchronization/operations' }
+function Get-ErsFbCutoverPath   { '/pure-protect/api/1.latest/recovery-plans/failback/cutover/operations' }
+function Get-ErsFbPromotePath   { '/pure-protect/api/1.latest/recovery-plans/failback/promotion/operations' }
+function Get-ErsSnapshotsPath   { '/pure-protect/api/1.latest/recovery-plans/snapshot-sets' }
 
-# POST body "plan_type" — the real API's enum for the failover operation body
+# POST body "plan_type" — FULL word: TEST / PRODUCTION
 function Get-ErsPlanTypeMap { @{ test = 'TEST'; prod = 'PRODUCTION' } }
-# GET polling query "failover_type" — a different, abbreviated vocabulary
+# GET polling "failover_type" — ABBREVIATED: TEST / PROD
 function Get-ErsFailoverQueryTypeMap { @{ test = 'TEST'; prod = 'PROD' } }
 
 function Get-ErsPlanPrerequisites {

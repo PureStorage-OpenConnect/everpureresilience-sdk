@@ -28,21 +28,38 @@
         'Register-ErsSite'
 
         'Get-ErsPolicy'
+        'New-ErsPolicy'
+        'Remove-ErsPolicy'
 
         'Get-ErsGroup'
+        'New-ErsGroup'
+        'Remove-ErsGroup'
         'Enable-ErsGroup'
         'Disable-ErsGroup'
         'Invoke-ErsGroupRun'
         'Wait-ErsGroup'
 
         'Get-ErsPlan'
+        'New-ErsPlan'
+        'Remove-ErsPlan'
+        'Add-ErsPlanGroup'
+        'Remove-ErsPlanGroup'
         'Invoke-ErsPlanFailover'
         'Invoke-ErsPlanCleanup'
         'Invoke-ErsPlanFailback'
         'Wait-ErsPlan'
         'Get-ErsPlanSnapshot'
 
+        'Get-ErsVm'
+        'Add-ErsGroupVm'
+        'Remove-ErsGroupVm'
+
         'Get-ErsSite'
+        'New-ErsSiteVM'
+        'Remove-ErsSiteVM'
+        'Test-ErsSiteVM'
+        'Get-ErsSiteNetwork'
+        'Get-ErsSiteFolder'
 
         'Start-ErsVM'
         'Stop-ErsVM'

@@ -1,21 +1,8 @@
-# Copyright 2026 Everpure
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+# Copyright 2026 Everpure™
+# Licensed under the Apache License, Version 2.0
 
 # ERS.PowerCLI — root module.
-# Loads classes first (other files depend on them), then private helpers,
-# then public cmdlets. Only Public/*.ps1 functions are exported — see
-# ERS.PowerCLI.psd1's FunctionsToExport for the authoritative list.
+# Loads classes first, then private helpers, then public cmdlets.
 
 $moduleRoot = $PSScriptRoot
 
@@ -30,13 +17,28 @@ foreach ($folder in @('Classes', 'Private', 'Public')) {
 }
 
 Export-ModuleMember -Function @(
+    # Session
     'New-ErsInstance', 'Register-ErsSite',
-    'Get-ErsPolicy',
-    'Get-ErsGroup', 'Enable-ErsGroup', 'Disable-ErsGroup', 'Invoke-ErsGroupRun', 'Wait-ErsGroup',
-    'Get-ErsPlan', 'Invoke-ErsPlanFailover', 'Invoke-ErsPlanCleanup', 'Invoke-ErsPlanFailback',
+    # Policy CRUD
+    'Get-ErsPolicy', 'New-ErsPolicy', 'Remove-ErsPolicy',
+    # Group CRUD + actions
+    'Get-ErsGroup', 'New-ErsGroup', 'Remove-ErsGroup',
+    'Enable-ErsGroup', 'Disable-ErsGroup',
+    'Invoke-ErsGroupRun', 'Wait-ErsGroup',
+    # Plan CRUD + actions
+    'Get-ErsPlan', 'New-ErsPlan', 'Remove-ErsPlan',
+    'Add-ErsPlanGroup', 'Remove-ErsPlanGroup',
+    'Invoke-ErsPlanFailover', 'Invoke-ErsPlanCleanup', 'Invoke-ErsPlanFailback',
     'Wait-ErsPlan', 'Get-ErsPlanSnapshot',
+    # VM enrollment
+    'Get-ErsVm', 'Add-ErsGroupVm', 'Remove-ErsGroupVm',
+    # vCenter site operations
     'Get-ErsSite',
-    'Start-ErsVM', 'Stop-ErsVM', 'Connect-ErsVMNetwork', 'Export-ErsTag', 'Import-ErsTag',
+    'New-ErsSiteVM', 'Remove-ErsSiteVM', 'Test-ErsSiteVM',
+    'Get-ErsSiteNetwork', 'Get-ErsSiteFolder',
+    'Start-ErsVM', 'Stop-ErsVM', 'Connect-ErsVMNetwork',
+    'Export-ErsTag', 'Import-ErsTag',
+    # Workflows
     'Invoke-ErsManagedFailover', 'Invoke-ErsManagedFailback',
     'Invoke-ErsSystemTest'
 )

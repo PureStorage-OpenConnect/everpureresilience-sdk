@@ -1,29 +1,13 @@
-# Copyright 2026 Everpure
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+# Copyright 2026 Everpure™
+# Licensed under the Apache License, Version 2.0
 
-# Private: thin Pure1 REST client (Invoke-RestMethod-backed) and a
-# generic poll-until-terminal-state helper — mirrors ers/http.py.
-# Failures throw terminating errors (PowerShell's natural equivalent of
-# Python's ApiError) rather than printing-and-continuing, so callers can
-# use normal try/catch.
-
-# TERMINAL_STATES moved to Private/Constants.ps1's Get-ErsTerminalStates
+# Private: thin Pure1 REST client and poll-until-terminal helper.
+# ERS_DEBUG=1 env var prints every request/response (same as Python's http.py).
 
 function Invoke-ErsApiRequest {
     param(
         [Parameter(Mandatory)][ErsInstance]$ErsInstance,
-        [Parameter(Mandatory)][ValidateSet('GET', 'POST', 'PATCH')][string]$Method,
+        [Parameter(Mandatory)][ValidateSet('GET', 'POST', 'PATCH', 'DELETE')][string]$Method,
         [Parameter(Mandatory)][string]$Path,
         [hashtable]$QueryParams,
         [hashtable]$Body
@@ -47,18 +31,35 @@ function Invoke-ErsApiRequest {
         Method  = $Method
         Headers = $headers
     }
+    $jsonBody = $null
     if ($Body) {
         $invokeArgs.ContentType = 'application/json'
-        $invokeArgs.Body        = ($Body | ConvertTo-Json -Depth 10 -Compress)
+        $jsonBody = ($Body | ConvertTo-Json -Depth 10 -Compress)
+        $invokeArgs.Body = $jsonBody
+    }
+
+    $debug = $env:ERS_DEBUG -eq '1'
+    if ($debug) {
+        Write-Host "[ERS_DEBUG] --> $Method $($ErsInstance.BaseUrl)$Path" -ForegroundColor DarkGray
+        if ($QueryParams) { Write-Host "[ERS_DEBUG] params: $($QueryParams | ConvertTo-Json -Compress)" -ForegroundColor DarkGray }
+        if ($jsonBody)    { Write-Host "[ERS_DEBUG] body: $jsonBody" -ForegroundColor DarkGray }
     }
 
     try {
-        return Invoke-RestMethod @invokeArgs
+        $response = Invoke-RestMethod @invokeArgs
+        if ($debug) {
+            Write-Host "[ERS_DEBUG] <-- 200" -ForegroundColor DarkGray
+        }
+        return $response
     } catch {
         $statusCode = $_.Exception.Response.StatusCode.value__
         $respBody   = $null
         if ($_.ErrorDetails -and $_.ErrorDetails.Message) {
             $respBody = $_.ErrorDetails.Message
+        }
+        if ($debug) {
+            Write-Host "[ERS_DEBUG] <-- $statusCode" -ForegroundColor DarkGray
+            Write-Host "[ERS_DEBUG] response body: $respBody" -ForegroundColor DarkGray
         }
         throw "HTTP error $statusCode calling $Method $Path`: $respBody"
     }
@@ -68,7 +69,6 @@ function Wait-ErsOperation {
     <#
     .SYNOPSIS
         Polls an operation endpoint until it reaches a terminal state.
-        Returns the final status string.
     #>
     param(
         [Parameter(Mandatory)][ErsInstance]$ErsInstance,
@@ -114,4 +114,40 @@ function Wait-ErsOperation {
 
     Write-Host "  Max polls ($MaxPolls) reached without terminal state."
     return 'TIMEOUT'
+}
+
+function Invoke-ErsApiGetAll {
+    <#
+    .SYNOPSIS
+        Fetches all pages from a Pure1 GET endpoint using offset-based
+        pagination. Returns all items combined. Needed because the API
+        ignores continuation_token and returns small default page sizes.
+    #>
+    param(
+        [Parameter(Mandatory)][ErsInstance]$ErsInstance,
+        [Parameter(Mandatory)][string]$Path,
+        [Parameter(Mandatory)][hashtable]$BaseParams
+    )
+
+    $allItems = @()
+    $offset = 0
+    $pageSize = 300
+    $total = $null
+
+    do {
+        $params = $BaseParams.Clone()
+        $params['offset'] = $offset
+        $params['limit']  = $pageSize
+
+        $data = Invoke-ErsApiRequest -ErsInstance $ErsInstance -Method GET -Path $Path -QueryParams $params
+        $items = @($data.items)
+        $allItems += $items
+
+        if ($null -eq $total) { $total = $data.total_item_count }
+        if ($items.Count -eq 0) { break }
+
+        $offset += $items.Count
+    } while ($null -ne $total -and $offset -lt $total)
+
+    return $allItems
 }

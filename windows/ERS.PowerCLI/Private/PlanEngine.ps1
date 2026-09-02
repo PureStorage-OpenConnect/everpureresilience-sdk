@@ -1,33 +1,10 @@
-# Copyright 2026 Everpure
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+# Copyright 2026 Everpure™
+# Licensed under the Apache License, Version 2.0
 
-# Private: the shared engine behind Invoke-ErsPlanFailover/Cleanup/Failback
-# — mirrors ers/resources/plan.py's _run_action(). Kept as one engine
-# (rather than duplicated per-cmdlet) since the prerequisite-checking and
-# state-file bookkeeping is identical across all four actions.
-#
-# IMPORTANT vocabulary note (this is exactly the bug we found and fixed in
-# the Python SDK — replicate the distinction here too, don't collapse it):
-#   - The failover POST body's "plan_type" field uses the FULL word
-#     "PRODUCTION" for prod, "TEST" for test.
-#   - The polling GET's "failover_type" query param uses the ABBREVIATED
-#     "PROD" for prod, "TEST" for test.
-# These are two different vocabularies for the same concept. Using "PROD"
-# in the POST body gets a "Failed to read HTTP message" / unexpected-enum
-# error from the API. See Private/Constants.ps1 for Get-ErsPlanTypeMap /
-# Get-ErsFailoverQueryTypeMap / Get-ErsPlanPrerequisites / the path
-# constants used throughout this file.
+# Private: shared engine behind Invoke-ErsPlanFailover/Cleanup/Failback.
+# Cleanup and failover now kick off ALL plans first, then batch-poll —
+# so multiple plans run in parallel on the server instead of serially.
+# Failback remains serial (its sync→cutover→promotion chain is sequential).
 
 function Get-ErsPlanState {
     $path = Get-ErsStatePath -FileName (Get-ErsPlanStateFileName)
@@ -68,17 +45,13 @@ function Invoke-ErsPlanAction {
         [string[]]$SnapshotIds,
         [string]$Site,
         [int]$IntervalSeconds = 10,
-        [int]$MaxPolls = 30
+        [int]$MaxPolls = 30,
+        [switch]$WithMonitor
     )
 
     $resolved = Resolve-ErsPlans -ErsInstance $ErsInstance -Names $Name
-    if ($resolved.NotFound.Count -gt 0) {
-        Write-Warning "Plans not found: $($resolved.NotFound -join ', ')"
-    }
-    if ($resolved.Matched.Count -eq 0) {
-        Write-Host 'No matching plans found.'
-        return @()
-    }
+    if ($resolved.NotFound.Count -gt 0) { Write-Warning "Plans not found: $($resolved.NotFound -join ', ')" }
+    if ($resolved.Matched.Count -eq 0) { Write-Host 'No matching plans found.'; return @() }
 
     $planState = Get-ErsPlanState
     $prereq    = (Get-ErsPlanPrerequisites)[$Action]
@@ -115,26 +88,17 @@ function Invoke-ErsPlanAction {
             $result = Invoke-ErsApiRequest -ErsInstance $ErsInstance -Method POST -Path (Get-ErsCleanupPath) `
                 -QueryParams @{ deployment_id = $ErsInstance.DeploymentId; recovery_plan_id = $planId } -Body @{}
             $op = Get-ErsOpResult -ApiResult $result
-            $status = Wait-ErsOperation -ErsInstance $ErsInstance -Path (Get-ErsCleanupPath) -OpId $op.Id `
-                -Label $Action -IntervalSeconds $IntervalSeconds -MaxPolls $MaxPolls
-            $planState[$stateKey] = @{ last_action = $Action; last_status = $status; op_id = $op.Id }
-            $results += [pscustomobject]@{ plan = $planName; op_id = $op.Id; status = $status; type = $op.Type }
+            # Don't poll inline — collected and batch-polled below
+            $planState[$stateKey] = @{ last_action = $Action; last_status = $op.Status; op_id = $op.Id }
+            $results += [pscustomobject]@{ plan = $planName; op_id = $op.Id; status = $op.Status; type = $op.Type }
         }
         elseif ($Action -eq 'failback') {
-            if (-not $Site) {
-                Write-Host "  ${planName}: SKIPPED — Site is required for failback."
-                continue
-            }
+            # Failback is inherently sequential (sync→cutover→promotion)
+            if (-not $Site) { Write-Host "  ${planName}: SKIPPED — Site is required for failback."; continue }
             $targetSiteId = Resolve-ErsSiteId -ErsInstance $ErsInstance -SiteName $Site
-            if (-not $targetSiteId) {
-                Write-Host "  ${planName}: SKIPPED — site '$Site' not found."
-                continue
-            }
+            if (-not $targetSiteId) { Write-Host "  ${planName}: SKIPPED — site '$Site' not found."; continue }
             $groupIds = @($plan.groups | ForEach-Object { $_.id })
-            if ($groupIds.Count -eq 0) {
-                Write-Host "  ${planName}: SKIPPED — no groups found in plan."
-                continue
-            }
+            if ($groupIds.Count -eq 0) { Write-Host "  ${planName}: SKIPPED — no groups in plan."; continue }
 
             $syncResult = Invoke-ErsApiRequest -ErsInstance $ErsInstance -Method POST -Path (Get-ErsFbSyncPath) `
                 -QueryParams @{ deployment_id = $ErsInstance.DeploymentId; recovery_plan_id = $planId } `
@@ -178,7 +142,7 @@ function Invoke-ErsPlanAction {
             $planState[$stateKey] = @{ last_action = $Action; last_status = $status; op_id = $promoteOp.Id }
         }
         else {
-            # test_failover / prod_failover
+            # test_failover / prod_failover — kick off, batch-poll below
             $kind = $Action.Split('_')[0]
             $body = @{ plan_type = (Get-ErsPlanTypeMap)[$kind]; scale = 0; snapshot_set_ids = $snaps }
             $result = Invoke-ErsApiRequest -ErsInstance $ErsInstance -Method POST -Path (Get-ErsFailoverPath) `
@@ -188,13 +152,31 @@ function Invoke-ErsPlanAction {
             $ops = Get-ErsPlanOps
             $ops[$stateKey] = @{ op_id = $op.Id; last_action = $Action; plan_id = $planId; plan_name = $planName }
             Set-ErsPlanOps -Ops $ops
+            # Don't poll inline — batch-polled below
+            $planState[$stateKey] = @{ last_action = $Action; last_status = $op.Status; op_id = $op.Id }
+            $results += [pscustomobject]@{ plan = $planName; op_id = $op.Id; status = $op.Status; type = $op.Type }
+        }
+    }
 
-            $extra = @{ failover_type = (Get-ErsFailoverQueryTypeMap)[$kind] }
-            $status = Wait-ErsOperation -ErsInstance $ErsInstance -Path (Get-ErsFailoverPath) -OpId $op.Id `
-                -Label $Action -IntervalSeconds $IntervalSeconds -MaxPolls $MaxPolls -ExtraParams $extra
-
-            $planState[$stateKey] = @{ last_action = $Action; last_status = $status; op_id = $op.Id }
-            $results += [pscustomobject]@{ plan = $planName; op_id = $op.Id; status = $status; type = $op.Type }
+    # Batch-poll: for actions that kicked off multiple operations above
+    # without polling inline, poll them all now — they've been running
+    # in parallel on the server.
+    if ($WithMonitor -and $Action -in @('cleanup', 'test_failover', 'prod_failover')) {
+        foreach ($r in $results) {
+            if ($r.op_id -and $r.status -notin (Get-ErsTerminalStates)) {
+                $extraParams = @{}
+                if ($Action -in @('test_failover', 'prod_failover')) {
+                    $kind = $Action.Split('_')[0]
+                    $extraParams = @{ failover_type = (Get-ErsFailoverQueryTypeMap)[$kind] }
+                }
+                $pollPath = if ($Action -eq 'cleanup') { Get-ErsCleanupPath } else { Get-ErsFailoverPath }
+                $finalStatus = Wait-ErsOperation -ErsInstance $ErsInstance -Path $pollPath -OpId $r.op_id `
+                    -Label "$Action`: $($r.plan)" -IntervalSeconds $IntervalSeconds -MaxPolls $MaxPolls `
+                    -ExtraParams $(if ($extraParams.Count -gt 0) { $extraParams } else { $null })
+                $r.status = $finalStatus
+                $stateKey = $r.plan.ToLower()
+                $planState[$stateKey] = @{ last_action = $Action; last_status = $finalStatus; op_id = $r.op_id }
+            }
         }
     }
 
