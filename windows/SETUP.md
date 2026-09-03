@@ -29,10 +29,14 @@ standard Apache header; `NOTICE` carries the project attribution.
 
 ```powershell
 # From a git repo (tag, branch, or commit) — clone, then:
+
+# Remove the "downloaded from internet" block on all files
+Get-ChildItem -Recurse .\ERS.PowerCLI\*.ps1 | Unblock-File
+
 Import-Module .\ERS.PowerCLI\ERS.PowerCLI.psd1
 
 # Or, once published to the PowerShell Gallery / a private repository:
-Install-Module -Name ERS.PowerCLI -RequiredVersion 2.7.0 -Scope CurrentUser
+Install-Module -Name ERS.PowerCLI -RequiredVersion 2.8.0 -Scope CurrentUser
 Import-Module ERS.PowerCLI
 ```
 
