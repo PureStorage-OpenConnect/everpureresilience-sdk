@@ -98,10 +98,11 @@ examples:
   --managed -- orchestrated failover/failback across two registered sites
   ers-cli --managed failover --from site1 --to site2 \\
              --vms-file vm-list.json --group-names group1,group2 --plan-names plan1,plan2 \\
-             --with-tags --create-missing-tags --dry-run
+             --with-tags --create-missing-tags --with-power on --dry-run
 
   ers-cli --managed failback --from site2 --to site1 \\
-             --vms-file vm-list.json --group-names group1,group2 --plan-names plan1,plan2
+             --vms-file vm-list.json --group-names group1,group2 --plan-names plan1,plan2 \\
+             --with-power on
 
   other
   ers-cli --monitor group|plan --names group1,plan1
@@ -234,6 +235,8 @@ def main():
     parser.add_argument("--plan-names", metavar="P1,P2", help="Plans for managed workflows")
     parser.add_argument("--with-network", action="store_true")
     parser.add_argument("--with-tags", action="store_true")
+    parser.add_argument("--with-power", choices=["on", "off"], metavar="on|off",
+                         help="Power on or off target VMs as the final step of a managed workflow")
     parser.add_argument("--create-missing-tags", action="store_true")
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--with-monitor", action="store_true",
@@ -537,6 +540,7 @@ def main():
             plan_names=csv_list(args.plan_names),
             from_site=args.from_site, to_site=args.to_site,
             with_network=args.with_network, with_tags=args.with_tags,
+            with_power=args.with_power,
             create_missing_tags=args.create_missing_tags, dry_run=args.dry_run,
             interval=args.interval, max_polls=args.max_polls,
         )

@@ -30,6 +30,7 @@ class Workflow:
     def managed_failover(self, *, vms_file: str, group_names: list, plan_names: list,
                           from_site: str, to_site: str,
                           with_network: bool = False, with_tags: bool = False,
+                          with_power: str = None,
                           create_missing_tags: bool = False, dry_run: bool = False,
                           interval: int = 10, max_polls: int = 30):
         ers = self._ers
@@ -90,12 +91,20 @@ class Workflow:
         elif with_network:
             self._dry(f"{to_site}.connect_networks(file={vms_file!r})")
 
+        if with_power and not dry_run:
+            action_fn = tgt.power_on if with_power == "on" else tgt.power_off
+            self._step(f"Power {'on' if with_power == 'on' else 'off'} target VMs")
+            action_fn(file=vms_file)
+        elif with_power:
+            self._dry(f"{to_site}.power_{'on' if with_power == 'on' else 'off'}(file={vms_file!r})")
+
         self._banner("MANAGED FAILOVER COMPLETE")
         return True
 
     def managed_failback(self, *, vms_file: str, group_names: list, plan_names: list,
                           from_site: str, to_site: str,
                           with_network: bool = False, with_tags: bool = False,
+                          with_power: str = None,
                           create_missing_tags: bool = False, dry_run: bool = False,
                           interval: int = 10, max_polls: int = 30):
         """`to_site` is also used as the Pure1 site name for plan.failback()."""
@@ -157,6 +166,13 @@ class Workflow:
             tgt.connect_networks(file=vms_file)
         elif with_network:
             self._dry(f"{to_site}.connect_networks(file={vms_file!r})")
+
+        if with_power and not dry_run:
+            action_fn = tgt.power_on if with_power == "on" else tgt.power_off
+            self._step(f"Power {'on' if with_power == 'on' else 'off'} source VMs")
+            action_fn(file=vms_file)
+        elif with_power:
+            self._dry(f"{to_site}.power_{'on' if with_power == 'on' else 'off'}(file={vms_file!r})")
 
         self._banner("MANAGED FAILBACK COMPLETE")
         return True

@@ -34,6 +34,7 @@ function Invoke-ErsManagedFailover {
         [Parameter(Mandatory)][string]$ToSite,
         [switch]$WithNetwork,
         [switch]$WithTags,
+        [ValidateSet('on','off')][string]$WithPower,
         [switch]$CreateMissingTags,
         [switch]$DryRun,
         [int]$IntervalSeconds = 10,
@@ -115,6 +116,21 @@ function Invoke-ErsManagedFailover {
             Connect-ErsVMNetwork -ErsSite $tgt -VmsFile $VmsFile | Out-Null
         } else {
             Write-ErsDry "Connect-ErsVMNetwork -ErsSite $ToSite -VmsFile $VmsFile"
+        }
+    }
+
+    if ($WithPower) {
+        if (-not $DryRun) {
+            $action = if ($WithPower -eq 'on') { 'Power on' } else { 'Power off' }
+            Write-ErsStep "$action target VMs"
+            if ($WithPower -eq 'on') {
+                Start-ErsVM -ErsSite $tgt -VmsFile $VmsFile | Out-Null
+            } else {
+                Stop-ErsVM -ErsSite $tgt -VmsFile $VmsFile | Out-Null
+            }
+        } else {
+            $cmd = if ($WithPower -eq 'on') { 'Start-ErsVM' } else { 'Stop-ErsVM' }
+            Write-ErsDry "$cmd -ErsSite $ToSite -VmsFile $VmsFile"
         }
     }
 
