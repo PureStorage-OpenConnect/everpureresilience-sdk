@@ -29,7 +29,7 @@ Export-ModuleMember -Function @(
     'Get-ErsPlan', 'New-ErsPlan', 'Remove-ErsPlan',
     'Add-ErsPlanGroup', 'Remove-ErsPlanGroup',
     'Invoke-ErsPlanFailover', 'Invoke-ErsPlanCleanup', 'Invoke-ErsPlanFailback',
-    'Wait-ErsPlan', 'Get-ErsPlanSnapshot',
+    'Wait-ErsPlan', 'Get-ErsPlanSnapshot', 'Sync-ErsPlan',
     # VM enrollment
     'Get-ErsVm', 'Add-ErsGroupVm', 'Remove-ErsGroupVm',
     # vCenter site operations

@@ -106,6 +106,8 @@ examples:
 
   other
   ers-cli --monitor group|plan --names group1,plan1
+  ers-cli --monitor plan --sync                        # sync ALL plans from Pure1 API
+  ers-cli --monitor plan --sync --names plan1,plan2    # sync specific plans
   ers-cli --profile staging --list groups
 """
 
@@ -244,6 +246,11 @@ def main():
                               "run and --plan failover/cleanup/failback. Without it, the "
                               "command just kicks off and returns the op ID(s); monitor "
                               "separately with --monitor group|plan.")
+    parser.add_argument("--sync", action="store_true",
+                         help="With --monitor plan: query Pure1 for the latest operation "
+                              "per plan and update the local state files, instead of "
+                              "reading from a prior kickoff. Useful when operations were "
+                              "started outside the CLI.")
 
     args = parser.parse_args()
 
@@ -428,9 +435,15 @@ def main():
     if args.monitor:
         resource = args.monitor.lower()
         if resource == "group":
+            if args.sync:
+                print("Error: --sync is only supported with --monitor plan")
+                sys.exit(1)
             e.group.monitor(*names, interval=args.interval, max_polls=args.max_polls)
         elif resource == "plan":
-            e.plan.monitor(*names, interval=args.interval, max_polls=args.max_polls)
+            if args.sync:
+                e.plan.sync(*names)
+            else:
+                e.plan.monitor(*names, interval=args.interval, max_polls=args.max_polls)
         else:
             print(f"Error: --monitor must be group|plan, got '{args.monitor}'")
             sys.exit(1)

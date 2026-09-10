@@ -481,6 +481,95 @@ class PlanResource:
         item  = items[0] if items else {}
         return item.get("id", "-"), item.get("status", "-"), item.get("type", "-")
 
+    # -- sync ---------------------------------------------------------------
+    def sync(self, *names):
+        """Queries the Pure1 API for the latest operation on each plan
+        and updates the local state files (last_plan_run_ops.json and
+        last_plan_ops.json) to match — useful when operations were
+        kicked off outside the CLI (e.g. via the GUI), or when the
+        state file was lost/wiped."""
+        ers = self._ers
+        resolve_names = list(names) if names else None
+
+        if not resolve_names:
+            # No names given — sync ALL known plans
+            params = {"deployment_id": ers.deployment_id}
+            data = ers.api.get(PLANS_PATH, params=params)
+            all_plans = data.get("items") or []
+            resolve_names = [p["name"] for p in all_plans]
+
+        if not resolve_names:
+            print("No plans found to sync.")
+            return
+
+        resolved = self._resolve(resolve_names)
+        matched, not_found = resolved
+        if not_found:
+            print(f"Warning: plans not found: {', '.join(not_found)}")
+        if not matched:
+            print("No matching plans — nothing to sync.")
+            return
+
+        # Query each operation endpoint for the latest op per plan
+        op_endpoints = [
+            ("failover",    FAILOVER_PATH,   {"TEST": "test_failover", "PROD": "prod_failover"}),
+            ("cleanup",     CLEANUP_PATH,    {"CLEANUP": "cleanup"}),
+            ("promotion",   FB_PROMOTE_PATH, {"PROMOTION": "failback"}),
+        ]
+
+        ops = {}    # plan_name_lower -> {op_id, last_action, plan_id, plan_name}
+        state = {}  # plan_name_lower -> {last_action, last_status, op_id}
+
+        print(f"\nSyncing operation state for {len(matched)} plan(s)...\n")
+        print(f"  {'Plan':<30} {'Action':<20} {'Status':<16} {'Op ID'}")
+        print(f"  {'-'*100}")
+
+        for plan in matched:
+            plan_id = plan["id"]
+            plan_name = plan["name"]
+            key = plan_name.lower()
+
+            best_op = None
+            best_action = None
+            best_time = -1
+
+            for label, path, type_map in op_endpoints:
+                try:
+                    params = {"offset": 0, "limit": 5,
+                              "deployment_id": ers.deployment_id,
+                              "recovery_plan_id": plan_id}
+                    result = ers.api.get(path, params=params)
+                    for item in (result.get("items") or []):
+                        created = item.get("created_at") or 0
+                        if created > best_time:
+                            op_type = item.get("type", "")
+                            best_time = created
+                            best_op = item
+                            best_action = type_map.get(op_type, label)
+                except Exception:
+                    pass  # endpoint may return empty for plans that never ran this action
+
+            if best_op:
+                op_id = best_op.get("id", "-")
+                status = best_op.get("status", "UNKNOWN")
+                ops[key] = {"op_id": op_id, "last_action": best_action,
+                            "plan_id": plan_id, "plan_name": plan_name}
+                state[key] = {"last_action": best_action, "last_status": status,
+                              "op_id": op_id}
+                print(f"  {plan_name:<30} {best_action:<20} {status:<16} {op_id}")
+            else:
+                print(f"  {plan_name:<30} {'(no operations)':<20}")
+
+        if ops:
+            self._save_ops(ops)
+        if state:
+            existing_state = self._load_state()
+            existing_state.update(state)
+            self._save_state(existing_state)
+
+        print(f"\n  State files updated ({len(ops)} plan(s) synced).")
+        print(f"  You can now run: ers-cli --monitor plan --names ...")
+
     # -- monitor ------------------------------------------------------------
     def monitor(self, *names, interval: int = 10, max_polls: int = 30):
         import time
